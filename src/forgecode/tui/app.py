@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
+import os
 import sys
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.panel import Panel
 from rich.rule import Rule
@@ -22,6 +23,27 @@ from forgecode.providers import (
     ThinkingEnd,
     ThinkingStart,
     create_provider,
+)
+
+# ── ASCII 小狗 ────────────────────────────────────
+
+ASCII_DOG = r"""
+   /\___/\
+  (  o o  )
+  (  =^=  )
+   (______)"""
+
+VERSION = "0.1.0"
+
+# ── prompt_toolkit 样式 ───────────────────────────
+
+PROMPT_STYLE = Style.from_dict(
+    {
+        "prompt": "bold #00ff87",
+        "placeholder": "#555555",
+        "bottom-toolbar": "bg:#1a1a2e #888888",
+        "bottom-toolbar.text": "bg:#1a1a2e #cccccc",
+    }
 )
 
 
@@ -41,28 +63,39 @@ class ForgeApp:
         self._show_thinking: bool = True
         self._exit_flag: bool = False
 
+    # ── 启动 ───────────────────────────────────────
+
     def run(self) -> None:
-        """启动 TUI 事件循环。"""
+        """同步入口。"""
+        import asyncio
+
         asyncio.run(self._run_async())
 
     async def _run_async(self) -> None:
         """异步主循环。"""
-        self._render_header()
+        self._render_banner()
 
         # 创建 prompt_toolkit session
         history = InMemoryHistory()
-        session: PromptSession[str] = PromptSession(history=history)
+        session: PromptSession[str] = PromptSession(history=history, style=PROMPT_STYLE)
 
         while not self._exit_flag:
+            # 输入前打印顶部分割线
+            self.console.print(Rule(style="dim"))
+
             try:
                 user_input = await session.prompt_async(
-                    [("class:prompt", "> ")],
+                    message=[("class:prompt", "❯ ")],
+                    placeholder="Send a message...",
+                    bottom_toolbar=self._status_bar,
                 )
             except KeyboardInterrupt:
-                self.console.print("\n[dim]按 /exit 或 Ctrl+C 再次退出[/dim]")
+                self.console.print()
+                self.console.print("[dim]按 /exit 或 Ctrl+C 再次退出[/dim]")
                 continue
             except EOFError:
-                self.console.print("\n再见！")
+                self.console.print()
+                self.console.print("再见！")
                 break
 
             user_input = user_input.strip()
@@ -99,14 +132,14 @@ class ForgeApp:
                         "/thinking on|off  切换思考展示",
                     ),
                     title="可用命令",
+                    border_style="dim",
                 )
             )
             self.console.print()
 
         elif cmd == "/clear":
             self.conversation.clear()
-            self.console.print("[dim]对话历史已清空。[/dim]\n")
-            self._render_header()
+            self.console.print("[dim]对话历史已清空。[/dim]")
 
         elif cmd == "/providers":
             self.console.print()
@@ -114,12 +147,14 @@ class ForgeApp:
             for p in self.config.providers:
                 marker = " *" if p.name == self.config.active_provider_name else "  "
                 lines.append(f"{marker} {p.name}  ({p.protocol}/{p.model})")
-            self.console.print(Panel("\n".join(lines), title="供应商列表"))
+            self.console.print(
+                Panel("\n".join(lines), title="供应商列表", border_style="dim")
+            )
             self.console.print()
 
         elif cmd == "/switch":
             if not args:
-                self.console.print("[yellow]用法: /switch <供应商名称>[/yellow]")
+                self.console.print("[yellow]用法: /switch <名称>[/yellow]")
                 return
             name = args.strip()
             matching = [p for p in self.config.providers if p.name == name]
@@ -129,8 +164,9 @@ class ForgeApp:
             new_config = matching[0]
             self.provider = create_provider(new_config)
             self.config.active_provider_name = new_config.name
-            self.console.print(f"[green]已切换到 {new_config.name} ({new_config.model})[/green]")
-            self._render_header()
+            self.console.print(
+                f"[green]已切换到 {new_config.name} ({new_config.model})[/green]"
+            )
 
         elif cmd == "/thinking":
             arg = args.strip().lower()
@@ -144,7 +180,9 @@ class ForgeApp:
                 self.console.print("[yellow]用法: /thinking on|off[/yellow]")
 
         else:
-            self.console.print(f"[yellow]未知命令: {cmd}，输入 /help 查看可用命令[/yellow]")
+            self.console.print(
+                f"[yellow]未知命令: {cmd}，输入 /help 查看可用命令[/yellow]"
+            )
 
     # ── 消息发送 ──────────────────────────────────
 
@@ -152,14 +190,14 @@ class ForgeApp:
         """发送用户消息并流式渲染 AI 回复。"""
         # 显示用户消息
         self.console.print()
-        self.console.print(f"[bold]👤 你:[/bold] {text}")
+        self.console.print(f"[bold cyan]👤 你:[/bold cyan] {text}")
         self.console.print()
 
         # 记录用户消息
         self.conversation.add("user", text)
 
         # 开始渲染 AI 回复
-        self.console.print("[bold]🤖 AI:[/bold] ", end="")
+        self.console.print("[bold green]🤖 AI:[/bold green] ", end="")
 
         thinking_buffer: str = ""
         text_buffer: str = ""
@@ -176,14 +214,14 @@ class ForgeApp:
                 elif isinstance(event, ThinkingDelta):
                     thinking_buffer += event.text
                     if self._show_thinking:
-                        self._stream_text(event.text, color="dim")
+                        self._stream_text(event.text)
 
                 elif isinstance(event, ThinkingEnd):
                     if self._show_thinking:
                         self.console.print()
                         self.console.print("─" * 30)
                         self.console.print()
-                        self.console.print("[bold]🤖 回复:[/bold] ", end="")
+                        self.console.print("[bold green]🤖 回复:[/bold green] ", end="")
 
                 elif isinstance(event, TextDelta):
                     text_buffer += event.text
@@ -204,28 +242,50 @@ class ForgeApp:
         self.console.print()
 
         # 记录 AI 回复
-        if text_buffer or thinking_buffer:
-            content = text_buffer
-            self.conversation.add("assistant", content)
+        if text_buffer:
+            self.conversation.add("assistant", text_buffer)
 
     @staticmethod
-    def _stream_text(text: str, color: str = "") -> None:
-        """逐字输出文本到终端。"""
-        for char in text:
-            sys.stdout.write(char)
+    def _stream_text(text: str) -> None:
+        """逐 token 输出文本到终端。"""
+        sys.stdout.write(text)
         sys.stdout.flush()
 
     # ── 渲染 ──────────────────────────────────────
 
-    def _render_header(self) -> None:
-        """渲染顶部状态栏。"""
-        model = "?"
-        for p in self.config.providers:
-            if p.name == self.config.active_provider_name:
-                model = p.model
-                break
+    def _render_banner(self) -> None:
+        """渲染启动横幅。"""
+        cwd = os.getcwd()
+        # 如果路径太长，截断显示
+        home = os.path.expanduser("~")
+        if cwd.startswith(home):
+            cwd = "~" + cwd[len(home):]
+
+        self.console.print()
+        self.console.print(f"[bold blue]{ASCII_DOG}[/bold blue]")
+        self.console.print(f"  [bold]ForgeCode[/bold] [dim]v{VERSION}[/dim]    {cwd}")
         self.console.print()
         self.console.print(
-            Panel(f"[bold]ForgeCode[/bold] · {model}", style="bold blue")
+            "[dim]就绪 - 输入消息开始对话，/help 查看命令[/dim]"
         )
-        self.console.print(Rule(style="dim"))
+
+    def _status_bar(self) -> list[tuple[str, str]]:
+        """生成底部状态栏：左 provider name | 右 model name。"""
+        provider_name = self.config.active_provider_name
+        model_name = self._active_model()
+
+        # 计算需要的空格数以右对齐
+        total_width = 60  # 近似宽度
+        left = f" {provider_name} "
+        right = f" {model_name} "
+        padding = " " * max(1, total_width - len(left) - len(right))
+
+        bar = left + padding + right
+        return [("class:bottom-toolbar.text", bar)]
+
+    def _active_model(self) -> str:
+        """获取当前活动 provider 的 model 名称。"""
+        for p in self.config.providers:
+            if p.name == self.config.active_provider_name:
+                return p.model
+        return "?"
