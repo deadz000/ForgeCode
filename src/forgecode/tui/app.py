@@ -10,6 +10,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.styles import Style
 from rich.console import Console
+from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.rule import Rule
 from rich.text import Text
@@ -204,19 +205,12 @@ class ForgeApp:
                 if ev.thinking:
                     if not in_thinking:
                         in_thinking = True
-                        # 先提交前导文本
-                        if cur_text.strip():
-                            self.console.print()
-                            cur_text = ""
                     if self._show_thinking:
                         if not thinking_shown_header:
-                            self.console.print(
-                                "[dim]💭 思考过程:[/dim]"
-                            )
+                            self.console.print("[dim]💭 思考过程:[/dim]")
                             thinking_shown_header = True
                         self._stream_text(ev.thinking)
                     elif not thinking_shown_header:
-                        # 折叠状态：只显示一次指示
                         self.console.print(
                             "[dim]💭 思考中...（/thinking on 展开）[/dim]"
                         )
@@ -227,16 +221,14 @@ class ForgeApp:
                         in_thinking = False
                         if self._show_thinking:
                             self.console.print()
-                        if cur_text.strip():
-                            cur_text = ""
+                    # 静默累积文本，等完成后用 Markdown 渲染
                     cur_text += ev.text
-                    self._stream_text(ev.text)
 
                 elif ev.tool is not None:
                     in_thinking = False
                     thinking_shown_header = False
                     if cur_text.strip():
-                        self.console.print()
+                        self._render_markdown(cur_text)
                         cur_text = ""
 
                     if ev.tool.phase == Phase.START:
@@ -246,14 +238,19 @@ class ForgeApp:
                         self._render_tool_end(ev.tool)
 
                 elif ev.done:
-                    self.console.print()
+                    if cur_text.strip():
+                        self._render_markdown(cur_text)
+                        cur_text = ""
 
                 elif ev.err:
-                    self.console.print()
+                    if cur_text.strip():
+                        self._render_markdown(cur_text)
+                        cur_text = ""
                     self.console.print(f"[red]✕ {ev.err}[/red]")
 
         except Exception as e:
-            self.console.print()
+            if cur_text.strip():
+                self.console.print(cur_text)
             self.console.print(f"[red]✕ 对话出错: {e}[/red]")
 
         self.console.print()
@@ -276,7 +273,13 @@ class ForgeApp:
         if len(tool.result.split("\n")) > 8:
             self.console.print("  [dim]⎿ ...[/dim]")
 
-    # ── 流式输出 ──────────────────────────────────
+    # ── Markdown 渲染 ────────────────────────────
+
+    def _render_markdown(self, text: str) -> None:
+        """用 Rich Markdown 渲染文本（代码高亮、列表等）。"""
+        self.console.print(Markdown(text))
+
+    # ── 流式输出（仅用于思考内容） ─────────────────
 
     @staticmethod
     def _stream_text(text: str) -> None:
