@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# 配置文件（含 API Key，切勿提交）
+forgecode.yaml
+
+# 全局配置（含 API Key）
+.forgecode/
+
+# uv
+uv.lock
+
+# mypy / pytest
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
