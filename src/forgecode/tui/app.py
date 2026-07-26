@@ -1,7 +1,8 @@
-"""TUI 主应用：终端界面渲染、输入处理、命令分发。"""
+"""TUI 主应用：终端界面渲染、输入处理、命令分发、Agent 集成。"""
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 
@@ -13,17 +14,11 @@ from rich.panel import Panel
 from rich.rule import Rule
 from rich.text import Text
 
+from forgecode.agent import Agent, Phase, ToolEvent
 from forgecode.config.schema import AppConfig
 from forgecode.conversation.history import Conversation
-from forgecode.providers import (
-    BaseProvider,
-    ErrorEvent,
-    TextDelta,
-    ThinkingDelta,
-    ThinkingEnd,
-    ThinkingStart,
-    create_provider,
-)
+from forgecode.providers import BaseProvider, create_provider
+from forgecode.tool import Registry
 
 # ── ASCII 小狗 ────────────────────────────────────
 
@@ -33,7 +28,7 @@ ASCII_DOG = r"""
   (  =^=  )
    (______)"""
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 # ── prompt_toolkit 样式 ───────────────────────────
 
@@ -55,32 +50,33 @@ class ForgeApp:
         config: AppConfig,
         provider: BaseProvider,
         conversation: Conversation,
+        registry: Registry,
     ) -> None:
         self.config = config
         self.provider = provider
         self.conversation = conversation
+        self.registry = registry
         self.console = Console()
-        self._show_thinking: bool = True
+        self._show_thinking: bool = False
         self._exit_flag: bool = False
+        self._stream_task: asyncio.Task[None] | None = None
 
     # ── 启动 ───────────────────────────────────────
 
     def run(self) -> None:
         """同步入口。"""
-        import asyncio
-
         asyncio.run(self._run_async())
 
     async def _run_async(self) -> None:
         """异步主循环。"""
         self._render_banner()
 
-        # 创建 prompt_toolkit session
         history = InMemoryHistory()
-        session: PromptSession[str] = PromptSession(history=history, style=PROMPT_STYLE)
+        session: PromptSession[str] = PromptSession(
+            history=history, style=PROMPT_STYLE
+        )
 
         while not self._exit_flag:
-            # 输入前打印顶部分割线
             self.console.print(Rule(style="dim"))
 
             try:
@@ -105,12 +101,11 @@ class ForgeApp:
             if user_input.startswith("/"):
                 self._handle_command(user_input)
             else:
-                await self._send_message(user_input)
+                await self._submit(user_input)
 
     # ── 命令处理 ──────────────────────────────────
 
     def _handle_command(self, text: str) -> None:
-        """解析并执行 / 命令。"""
         parts = text.split(maxsplit=1)
         cmd = parts[0].lower()
         args = parts[1] if len(parts) > 1 else ""
@@ -145,10 +140,14 @@ class ForgeApp:
             self.console.print()
             lines: list[str] = []
             for p in self.config.providers:
-                marker = " *" if p.name == self.config.active_provider_name else "  "
+                marker = (
+                    " *" if p.name == self.config.active_provider_name else "  "
+                )
                 lines.append(f"{marker} {p.name}  ({p.protocol}/{p.model})")
             self.console.print(
-                Panel("\n".join(lines), title="供应商列表", border_style="dim")
+                Panel(
+                    "\n".join(lines), title="供应商列表", border_style="dim"
+                )
             )
             self.console.print()
 
@@ -184,56 +183,74 @@ class ForgeApp:
                 f"[yellow]未知命令: {cmd}，输入 /help 查看可用命令[/yellow]"
             )
 
-    # ── 消息发送 ──────────────────────────────────
+    # ── 提交消息 ──────────────────────────────────
 
-    async def _send_message(self, text: str) -> None:
-        """发送用户消息并流式渲染 AI 回复。"""
-        # 显示用户消息
+    async def _submit(self, text: str) -> None:
+        """用户提交消息 → Agent 接管。"""
+        self.conversation.add_user(text)
+
         self.console.print()
         self.console.print(f"[bold cyan]👤 你:[/bold cyan] {text}")
         self.console.print()
 
-        # 记录用户消息
-        self.conversation.add("user", text)
-
-        # 开始渲染 AI 回复
-        self.console.print("[bold green]🤖 AI:[/bold green] ", end="")
-
-        thinking_buffer: str = ""
-        text_buffer: str = ""
+        # 创建 Agent 并消费事件流
+        agent = Agent(self.provider, self.registry)
+        cur_text = ""
+        in_thinking = False
+        thinking_shown_header = False
 
         try:
-            async for event in self.provider.chat_stream(self.conversation.messages):  # type: ignore[attr-defined]
-                if isinstance(event, ThinkingStart):
-                    thinking_buffer = ""
+            async for ev in agent.run(self.conversation):
+                if ev.thinking:
+                    if not in_thinking:
+                        in_thinking = True
+                        # 先提交前导文本
+                        if cur_text.strip():
+                            self.console.print()
+                            cur_text = ""
                     if self._show_thinking:
+                        if not thinking_shown_header:
+                            self.console.print(
+                                "[dim]💭 思考过程:[/dim]"
+                            )
+                            thinking_shown_header = True
+                        self._stream_text(ev.thinking)
+                    elif not thinking_shown_header:
+                        # 折叠状态：只显示一次指示
+                        self.console.print(
+                            "[dim]💭 思考中...（/thinking on 展开）[/dim]"
+                        )
+                        thinking_shown_header = True
+
+                elif ev.text:
+                    if in_thinking:
+                        in_thinking = False
+                        if self._show_thinking:
+                            self.console.print()
+                        if cur_text.strip():
+                            cur_text = ""
+                    cur_text += ev.text
+                    self._stream_text(ev.text)
+
+                elif ev.tool is not None:
+                    in_thinking = False
+                    thinking_shown_header = False
+                    if cur_text.strip():
                         self.console.print()
-                        self.console.print("[dim]💭 思考过程:[/dim]")
-                        self.console.print("─" * 30)
+                        cur_text = ""
 
-                elif isinstance(event, ThinkingDelta):
-                    thinking_buffer += event.text
-                    if self._show_thinking:
-                        self._stream_text(event.text)
+                    if ev.tool.phase == Phase.START:
+                        self._render_tool_start(ev.tool)
 
-                elif isinstance(event, ThinkingEnd):
-                    if self._show_thinking:
-                        self.console.print()
-                        self.console.print("─" * 30)
-                        self.console.print()
-                        self.console.print("[bold green]🤖 回复:[/bold green] ", end="")
+                    elif ev.tool.phase == Phase.END:
+                        self._render_tool_end(ev.tool)
 
-                elif isinstance(event, TextDelta):
-                    text_buffer += event.text
-                    self._stream_text(event.text)
-
-                elif isinstance(event, ErrorEvent):
+                elif ev.done:
                     self.console.print()
-                    if event.retryable:
-                        self.console.print(f"[red]⚠ {event.message}[/red]")
-                    else:
-                        self.console.print(f"[red]✕ {event.message}[/red]")
-                    break
+
+                elif ev.err:
+                    self.console.print()
+                    self.console.print(f"[red]✕ {ev.err}[/red]")
 
         except Exception as e:
             self.console.print()
@@ -241,50 +258,60 @@ class ForgeApp:
 
         self.console.print()
 
-        # 记录 AI 回复
-        if text_buffer:
-            self.conversation.add("assistant", text_buffer)
+    # ── 工具行渲染 ────────────────────────────────
+
+    def _render_tool_start(self, tool: ToolEvent) -> None:
+        """渲染工具调用开始行：● name(args)。"""
+        self.console.print()
+        self.console.print(
+            f"[bold cyan]●[/bold cyan] [bold]{tool.name}[/bold]({tool.args})"
+        )
+
+    def _render_tool_end(self, tool: ToolEvent) -> None:
+        """渲染工具结果摘要：缩进的 ⎿ 结果。"""
+        style = "red" if tool.is_error else "dim"
+        lines = tool.result.split("\n")[:8]
+        for line in lines:
+            self.console.print(f"  [dim]⎿[/dim] [{style}]{line}[/{style}]")
+        if len(tool.result.split("\n")) > 8:
+            self.console.print("  [dim]⎿ ...[/dim]")
+
+    # ── 流式输出 ──────────────────────────────────
 
     @staticmethod
     def _stream_text(text: str) -> None:
-        """逐 token 输出文本到终端。"""
         sys.stdout.write(text)
         sys.stdout.flush()
 
     # ── 渲染 ──────────────────────────────────────
 
     def _render_banner(self) -> None:
-        """渲染启动横幅。"""
         cwd = os.getcwd()
-        # 如果路径太长，截断显示
         home = os.path.expanduser("~")
         if cwd.startswith(home):
             cwd = "~" + cwd[len(home):]
 
         self.console.print()
         self.console.print(f"[bold blue]{ASCII_DOG}[/bold blue]")
-        self.console.print(f"  [bold]ForgeCode[/bold] [dim]v{VERSION}[/dim]    {cwd}")
+        self.console.print(
+            f"  [bold]ForgeCode[/bold] [dim]v{VERSION}[/dim]    {cwd}"
+        )
         self.console.print()
         self.console.print(
             "[dim]就绪 - 输入消息开始对话，/help 查看命令[/dim]"
         )
 
     def _status_bar(self) -> list[tuple[str, str]]:
-        """生成底部状态栏：左 provider name | 右 model name。"""
         provider_name = self.config.active_provider_name
         model_name = self._active_model()
-
-        # 计算需要的空格数以右对齐
-        total_width = 60  # 近似宽度
+        total_width = 60
         left = f" {provider_name} "
         right = f" {model_name} "
         padding = " " * max(1, total_width - len(left) - len(right))
-
         bar = left + padding + right
         return [("class:bottom-toolbar.text", bar)]
 
     def _active_model(self) -> str:
-        """获取当前活动 provider 的 model 名称。"""
         for p in self.config.providers:
             if p.name == self.config.active_provider_name:
                 return p.model

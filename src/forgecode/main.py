@@ -8,6 +8,7 @@ import sys
 from forgecode.config.loader import load_config
 from forgecode.conversation.history import Conversation
 from forgecode.providers import create_provider
+from forgecode.tool import new_default_registry
 from forgecode.tui.app import ForgeApp
 
 
@@ -53,10 +54,12 @@ def cli() -> None:
         sys.exit(1)
 
     conversation = Conversation()
+    registry = new_default_registry()
     app = ForgeApp(
         config=app_config,
         provider=provider,
         conversation=conversation,
+        registry=registry,
     )
     app.run()
 

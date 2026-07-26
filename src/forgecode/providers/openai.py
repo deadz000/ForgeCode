@@ -1,4 +1,4 @@
-"""OpenAI Provider 实现。"""
+"""OpenAI Provider：流式对话 + 工具调用。"""
 
 from __future__ import annotations
 
@@ -8,20 +8,19 @@ import httpx
 from openai import APIStatusError, AsyncOpenAI
 
 from forgecode.config.schema import ProviderConfig
-from forgecode.conversation.history import Message
-from forgecode.providers import (
-    BaseProvider,
-    ErrorEvent,
-    StreamEvent,
-    TextDelta,
-    ThinkingDelta,
-    ThinkingEnd,
-    ThinkingStart,
+from forgecode.conversation.history import (
+    ROLE_ASSISTANT,
+    ROLE_TOOL,
+    ROLE_USER,
+    Message,
+    ToolCall,
+    ToolDefinition,
 )
+from forgecode.providers import BaseProvider, StreamEvent
 
 
 class OpenAIProvider(BaseProvider):
-    """封装 AsyncOpenAI，实现流式对话。"""
+    """封装 AsyncOpenAI，实现流式对话和工具调用。"""
 
     def __init__(self, config: ProviderConfig) -> None:
         super().__init__(config)
@@ -30,23 +29,47 @@ class OpenAIProvider(BaseProvider):
             api_key=config.api_key,
         )
 
-    async def chat_stream(self, messages: list[Message]) -> AsyncIterator[StreamEvent]:  # type: ignore[override,misc]
-        # 转换消息格式
-        api_messages: list[dict[str, str]] = [
-            {"role": m.role, "content": m.content} for m in messages
-        ]
+    def stream(
+        self,
+        msgs: list[Message],
+        tools: list[ToolDefinition],
+    ) -> AsyncIterator[StreamEvent]:
+        return self._stream_impl(msgs, tools)
 
-        # 流式调用，带重试
+    async def _stream_impl(
+        self,
+        msgs: list[Message],
+        tools: list[ToolDefinition],
+    ) -> AsyncIterator[StreamEvent]:
+        api_messages = _to_openai_messages(msgs)
+
+        params: dict = {
+            "model": self.config.model,
+            "messages": api_messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+
+        # 工具定义注入
+        if tools:
+            params["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.input_schema,
+                    },
+                }
+                for t in tools
+            ]
+
         for attempt in range(2):
             try:
-                stream = await self.client.chat.completions.create(  # type: ignore[call-overload]
-                    model=self.config.model,
-                    messages=api_messages,
-                    stream=True,
-                    stream_options={"include_usage": True},
-                )
-                thinking_started = False
-                thinking_ended = False
+                stream = await self.client.chat.completions.create(**params)
+
+                # 按 index 累加 tool_calls 参数
+                tool_calls_buf: dict[int, dict[str, str]] = {}
 
                 async for chunk in stream:
                     if not chunk.choices:
@@ -54,40 +77,106 @@ class OpenAIProvider(BaseProvider):
 
                     delta = chunk.choices[0].delta
 
-                    # 处理 reasoning tokens（o-series 模型）
-                    if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-                        if not thinking_started:
-                            thinking_started = True
-                            yield ThinkingStart()
-                        yield ThinkingDelta(text=delta.reasoning_content)
-
-                    # 处理普通文本
+                    # 文本增量
                     if delta.content:
-                        if thinking_started and not thinking_ended:
-                            thinking_ended = True
-                            yield ThinkingEnd()
-                        yield TextDelta(text=delta.content)
+                        yield StreamEvent(text=delta.content)
 
-                if thinking_started and not thinking_ended:
-                    yield ThinkingEnd()
+                    # 推理 tokens（o-series）
+                    if (
+                        hasattr(delta, "reasoning_content")
+                        and delta.reasoning_content
+                    ):
+                        yield StreamEvent(thinking=delta.reasoning_content)
 
-                return  # 成功
+                    # 工具调用增量
+                    if delta.tool_calls:
+                        for tc in delta.tool_calls:
+                            idx = tc.index
+                            if idx not in tool_calls_buf:
+                                tool_calls_buf[idx] = {
+                                    "id": "", "name": "", "args": ""
+                                }
+                            buf = tool_calls_buf[idx]
+                            if tc.id:
+                                buf["id"] = tc.id
+                            if tc.function and tc.function.name:
+                                buf["name"] = tc.function.name
+                            if tc.function and tc.function.arguments:
+                                buf["args"] += tc.function.arguments
+
+                # 流结束后组装 tool_calls
+                if tool_calls_buf:
+                    calls: list[ToolCall] = []
+                    for idx in sorted(tool_calls_buf.keys()):
+                        v = tool_calls_buf[idx]
+                        calls.append(
+                            ToolCall(
+                                id=v["id"],
+                                name=v["name"],
+                                input=v["args"] or "{}",
+                            )
+                        )
+                    yield StreamEvent(tool_calls=calls)
+
+                yield StreamEvent(done=True)
+                return
 
             except APIStatusError as e:
                 if e.status_code < 500:
-                    msg = f"API 错误 ({e.status_code}): {e.message}"
-                    yield ErrorEvent(message=msg, retryable=False)
+                    yield StreamEvent(
+                        err=Exception(f"API 错误 ({e.status_code}): {e.message}")
+                    )
                     return
                 if attempt == 1:
-                    msg = f"服务器错误 ({e.status_code}): {e.message}"
-                    yield ErrorEvent(message=msg, retryable=True)
+                    yield StreamEvent(
+                        err=Exception(f"服务器错误 ({e.status_code}): {e.message}")
+                    )
                     return
 
             except (httpx.HTTPError, httpx.NetworkError) as e:
                 if attempt == 1:
-                    yield ErrorEvent(message=f"网络错误: {e}", retryable=True)
+                    yield StreamEvent(err=Exception(f"网络错误: {e}"))
                     return
 
             except Exception as e:
-                yield ErrorEvent(message=f"未知错误: {e}", retryable=False)
+                yield StreamEvent(err=Exception(f"未知错误: {e}"))
                 return
+
+
+# ── 消息格式转换 ──────────────────────────────────
+
+
+def _to_openai_messages(msgs: list[Message]) -> list[dict]:
+    """将内部 Message 列表转为 OpenAI API 格式。"""
+    result: list[dict] = []
+    for m in msgs:
+        if m.role == ROLE_USER:
+            result.append({"role": "user", "content": m.content})
+        elif m.role == ROLE_ASSISTANT:
+            entry: dict = {"role": "assistant"}
+            if m.tool_calls:
+                entry["content"] = m.content or None
+                entry["tool_calls"] = [
+                    {
+                        "id": c.id,
+                        "type": "function",
+                        "function": {
+                            "name": c.name,
+                            "arguments": c.input,
+                        },
+                    }
+                    for c in m.tool_calls
+                ]
+            else:
+                entry["content"] = m.content
+            result.append(entry)
+        elif m.role == ROLE_TOOL:
+            for r in m.tool_results:
+                result.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": r.tool_call_id,
+                        "content": r.content,
+                    }
+                )
+    return result

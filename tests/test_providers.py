@@ -3,34 +3,33 @@
 import pytest
 
 from forgecode.config.schema import ProviderConfig
-from forgecode.providers import (
-    ErrorEvent,
-    TextDelta,
-    ThinkingDelta,
-    ThinkingEnd,
-    ThinkingStart,
-    create_provider,
-)
+from forgecode.providers import StreamEvent, create_provider
 from forgecode.providers.anthropic import AnthropicProvider
 from forgecode.providers.openai import OpenAIProvider
 
 
-def test_stream_event_types():
-    td = TextDelta(text="hello")
-    assert td.text == "hello"
+def test_stream_event_defaults():
+    se = StreamEvent()
+    assert se.text == ""
+    assert se.tool_calls == []
+    assert not se.done
+    assert se.err is None
 
-    ts = ThinkingStart()
-    assert ts is not None
 
-    td2 = ThinkingDelta(text="thinking...")
-    assert td2.text == "thinking..."
+def test_stream_event_text():
+    se = StreamEvent(text="hello")
+    assert se.text == "hello"
 
-    te = ThinkingEnd()
-    assert te is not None
 
-    ee = ErrorEvent(message="err", retryable=True)
-    assert ee.message == "err"
-    assert ee.retryable is True
+def test_stream_event_done():
+    se = StreamEvent(done=True)
+    assert se.done
+
+
+def test_stream_event_err():
+    err = Exception("test error")
+    se = StreamEvent(err=err)
+    assert se.err is err
 
 
 def test_create_anthropic_provider():

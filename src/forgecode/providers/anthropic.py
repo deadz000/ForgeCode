@@ -1,27 +1,27 @@
-"""Anthropic Claude Provider 实现。"""
+"""Anthropic Claude Provider：流式对话 + 工具调用。"""
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 
 import httpx
 from anthropic import APIStatusError, AsyncAnthropic
 
 from forgecode.config.schema import ProviderConfig
-from forgecode.conversation.history import Message
-from forgecode.providers import (
-    BaseProvider,
-    ErrorEvent,
-    StreamEvent,
-    TextDelta,
-    ThinkingDelta,
-    ThinkingEnd,
-    ThinkingStart,
+from forgecode.conversation.history import (
+    ROLE_ASSISTANT,
+    ROLE_TOOL,
+    ROLE_USER,
+    Message,
+    ToolCall,
+    ToolDefinition,
 )
+from forgecode.providers import BaseProvider, StreamEvent
 
 
 class AnthropicProvider(BaseProvider):
-    """封装 AsyncAnthropic，实现流式对话和 extended thinking。"""
+    """封装 AsyncAnthropic，实现流式对话、extended thinking 和工具调用。"""
 
     def __init__(self, config: ProviderConfig) -> None:
         super().__init__(config)
@@ -30,62 +30,133 @@ class AnthropicProvider(BaseProvider):
             api_key=config.api_key,
         )
 
-    async def chat_stream(self, messages: list[Message]) -> AsyncIterator[StreamEvent]:  # type: ignore[override,misc]
-        # 转换消息格式
-        api_messages = [{"role": m.role, "content": m.content} for m in messages]
+    def stream(
+        self,
+        msgs: list[Message],
+        tools: list[ToolDefinition],
+    ) -> AsyncIterator[StreamEvent]:
+        return self._stream_impl(msgs, tools)
 
-        # 构建请求参数
-        kwargs: dict = {
+    async def _stream_impl(
+        self,
+        msgs: list[Message],
+        tools: list[ToolDefinition],
+    ) -> AsyncIterator[StreamEvent]:
+        api_messages = _to_anthropic_messages(msgs)
+        has_tool_history = any(
+            m.role == ROLE_TOOL or m.tool_calls for m in msgs
+        )
+
+        params: dict = {
             "model": self.config.model,
             "max_tokens": 4096,
             "messages": api_messages,
         }
-        if self.config.thinking:
-            kwargs["thinking"] = {"type": "enabled", "budget_tokens": 2048}
 
-        # 流式调用，带重试
-        for attempt in range(2):  # 首次 + 1 次重试
+        # 工具定义注入
+        if tools:
+            params["tools"] = [
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.input_schema,
+                }
+                for t in tools
+            ]
+
+        # 含工具历史的请求不启用 thinking（避免 400）
+        if self.config.thinking and not has_tool_history:
+            params["thinking"] = {"type": "enabled", "budget_tokens": 2048}
+
+        for attempt in range(2):
             try:
-                async with self.client.messages.stream(**kwargs) as stream:
-                    thinking_started = False
-                    thinking_ended = False
-
+                async with self.client.messages.stream(**params) as stream:
                     async for event in stream:
-                        if event.type == "thinking":
-                            if not thinking_started:
-                                thinking_started = True
-                                yield ThinkingStart()
-                            yield ThinkingDelta(text=event.thinking)
+                        if event.type == "content_block_delta":
+                            if event.delta.type == "text_delta":
+                                yield StreamEvent(text=event.delta.text)
+                            elif event.delta.type == "thinking_delta":
+                                yield StreamEvent(thinking=event.delta.thinking)
+                            # input_json_delta → 跳过（SDK 内部累加）
 
-                        elif event.type == "text":
-                            if thinking_started and not thinking_ended:
-                                thinking_ended = True
-                                yield ThinkingEnd()
-                            yield TextDelta(text=event.text)
+                    # 流结束后取工具调用
+                    final_message = await stream.get_final_message()
+                    calls: list[ToolCall] = []
+                    for block in final_message.content:
+                        if block.type == "tool_use":
+                            calls.append(
+                                ToolCall(
+                                    id=block.id,
+                                    name=block.name,
+                                    input=json.dumps(block.input),
+                                )
+                            )
+                    if calls:
+                        yield StreamEvent(tool_calls=calls)
 
-                    # 如果整轮都在思考但没产生文本（极少见）
-                    if thinking_started and not thinking_ended:
-                        yield ThinkingEnd()
-
-                return  # 成功，退出重试循环
+                    yield StreamEvent(done=True)
+                return
 
             except APIStatusError as e:
                 if e.status_code < 500:
-                    # 4xx 不重试
-                    msg = f"API 错误 ({e.status_code}): {e.message}"
-                    yield ErrorEvent(message=msg, retryable=False)
+                    yield StreamEvent(
+                        err=Exception(f"API 错误 ({e.status_code}): {e.message}")
+                    )
                     return
-                # 5xx：重试
                 if attempt == 1:
-                    msg = f"服务器错误 ({e.status_code}): {e.message}"
-                    yield ErrorEvent(message=msg, retryable=True)
+                    yield StreamEvent(
+                        err=Exception(f"服务器错误 ({e.status_code}): {e.message}")
+                    )
                     return
 
             except (httpx.HTTPError, httpx.NetworkError) as e:
                 if attempt == 1:
-                    yield ErrorEvent(message=f"网络错误: {e}", retryable=True)
+                    yield StreamEvent(err=Exception(f"网络错误: {e}"))
                     return
 
             except Exception as e:
-                yield ErrorEvent(message=f"未知错误: {e}", retryable=False)
+                yield StreamEvent(err=Exception(f"未知错误: {e}"))
                 return
+
+
+# ── 消息格式转换 ──────────────────────────────────
+
+
+def _to_anthropic_messages(msgs: list[Message]) -> list[dict]:
+    """将内部 Message 列表转为 Anthropic API 格式。"""
+    result: list[dict] = []
+    for m in msgs:
+        if m.role == ROLE_USER:
+            result.append({"role": "user", "content": m.content})
+        elif m.role == ROLE_ASSISTANT:
+            if m.tool_calls:
+                # assistant 回合含工具调用：content 用数组
+                content_blocks: list[dict] = []
+                if m.content:
+                    content_blocks.append({"type": "text", "text": m.content})
+                for c in m.tool_calls:
+                    content_blocks.append(
+                        {
+                            "type": "tool_use",
+                            "id": c.id,
+                            "name": c.name,
+                            "input": json.loads(c.input),
+                        }
+                    )
+                result.append({"role": "assistant", "content": content_blocks})
+            else:
+                result.append({"role": "assistant", "content": m.content})
+        elif m.role == ROLE_TOOL:
+            # 工具结果打包进一条 user 消息的 content 数组
+            blocks: list[dict] = []
+            for r in m.tool_results:
+                blocks.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": r.tool_call_id,
+                        "content": r.content,
+                        "is_error": r.is_error,
+                    }
+                )
+            result.append({"role": "user", "content": blocks})
+    return result

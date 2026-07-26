@@ -1,52 +1,34 @@
-"""Provider 抽象层：定义统一流式对话接口。
+"""Provider 抽象层：统一流式对话接口 + 协议无关事件类型。"""
 
-新增后端只需继承 BaseProvider 并实现 chat_stream()，
-然后在 create_provider() 中添加分支即可。
-"""
+from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from forgecode.config.schema import ProviderConfig
-from forgecode.conversation.history import Message
+from forgecode.conversation.history import Message, ToolCall, ToolDefinition
 
-# ── 流式事件类型 ──────────────────────────────────
-
-
-@dataclass
-class TextDelta:
-    """一个文本 token。"""
-    text: str
+# ── 流式事件 ──────────────────────────────────────
 
 
 @dataclass
-class ThinkingStart:
-    """思考块开始。"""
-    pass
+class StreamEvent:
+    """流式事件（协议无关）。
 
+    字段语义：
+    - text 非空：文本增量（逐 token 产出）
+    - thinking 非空：思考增量（逐 token 产出）
+    - tool_calls 非空：本轮模型请求的工具调用列表（done 之前发出）
+    - done=True：本轮流结束
+    - err 非 None：出错（不中断会话，由上层处理）
+    """
 
-@dataclass
-class ThinkingDelta:
-    """一个思考 token。"""
-    text: str
-
-
-@dataclass
-class ThinkingEnd:
-    """思考块结束。"""
-    pass
-
-
-@dataclass
-class ErrorEvent:
-    """流式过程中的错误。"""
-    message: str
-    retryable: bool
-
-
-# 联合类型
-StreamEvent = TextDelta | ThinkingStart | ThinkingDelta | ThinkingEnd | ErrorEvent
+    text: str = ""
+    thinking: str = ""
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    done: bool = False
+    err: Exception | None = None
 
 
 # ── 抽象基类 ──────────────────────────────────────
@@ -59,14 +41,19 @@ class BaseProvider(ABC):
         self.config = config
 
     @abstractmethod
-    async def chat_stream(self, messages: list[Message]) -> AsyncIterator[StreamEvent]:
+    def stream(
+        self,
+        msgs: list[Message],
+        tools: list[ToolDefinition],
+    ) -> AsyncIterator[StreamEvent]:
         """
-        接收对话历史，返回流式事件序列。
+        流式对话。tools 为空列表表示不带工具，续答时仍传入（单轮由上层控制）。
 
-        事件顺序约定：
-        - ThinkingStart → ThinkingDelta* → ThinkingEnd → TextDelta* → 流结束
-        - 如果 thinking=False 或无思考内容，直接 TextDelta*
-        - 出错时 yield ErrorEvent，不抛异常
+        事件约定：
+        - 文本增量由 StreamEvent.text 逐 token 产出
+        - 工具调用在流结束前通过 StreamEvent.tool_calls 一次性产出
+        - 流正常结束时产出 StreamEvent(done=True)
+        - 出错时产出 StreamEvent(err=...)，不抛异常
         """
         ...
 
@@ -84,4 +71,6 @@ def create_provider(config: ProviderConfig) -> BaseProvider:
         return AnthropicProvider(config)
     if protocol == "openai":
         return OpenAIProvider(config)
-    raise ValueError(f"不支持的协议类型: {config.protocol}，仅支持 anthropic / openai")
+    raise ValueError(
+        f"不支持的协议类型: {config.protocol}，仅支持 anthropic / openai"
+    )
