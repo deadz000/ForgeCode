@@ -16,9 +16,10 @@ from rich.panel import Panel
 from rich.rule import Rule
 from rich.text import Text
 
-from forgecode.agent import Agent, Phase, ToolEvent
+from forgecode.agent import Agent, Mode, Phase, ToolEvent
 from forgecode.config.schema import AppConfig
 from forgecode.conversation.history import Conversation
+from forgecode.prompt import EXECUTE_DIRECTIVE
 from forgecode.providers import BaseProvider, create_provider
 from forgecode.tool import Registry
 
@@ -61,6 +62,10 @@ class ForgeApp:
         self.console = Console()
         self._show_thinking: bool = False
         self._exit_flag: bool = False
+        # Agent Loop 状态
+        self.mode: Mode = Mode.NORMAL
+        self._turn_cancel: asyncio.Event | None = None
+        self._iter: int = 0
         # token 用量累计
         self._total_input_tokens: int = 0
         self._total_output_tokens: int = 0
@@ -93,6 +98,12 @@ class ForgeApp:
                     bottom_toolbar=self._status_bar,
                 )
             except KeyboardInterrupt:
+                # 流式态 → 取消本轮；空闲态 → 退出
+                if self._turn_cancel is not None and not self._turn_cancel.is_set():
+                    self._turn_cancel.set()
+                    self.console.print()
+                    self.console.print("[dim]正在取消...[/dim]")
+                    continue
                 self.console.print()
                 self._exit_flag = True
                 continue
@@ -135,7 +146,9 @@ class ForgeApp:
                         "/exit, /quit 退出程序\n"
                         "/providers   列出已配置的供应商\n"
                         "/switch <n>  切换到指定供应商\n"
-                        "/thinking on|off  切换思考展示",
+                        "/thinking on|off  切换思考展示\n"
+                        "/plan        进入计划模式（仅只读工具）\n"
+                        "/do          批准计划并开始执行",
                     ),
                     title="可用命令",
                     border_style="dim",
@@ -189,6 +202,20 @@ class ForgeApp:
             else:
                 self.console.print("[yellow]用法: /thinking on|off[/yellow]")
 
+        elif cmd == "/plan":
+            self.mode = Mode.PLAN
+            self.console.print(
+                "[dim]已进入计划模式（仅只读工具），输入需求后产出计划。"
+                "用 /do 批准执行。[/dim]"
+            )
+
+        elif cmd == "/do":
+            self.mode = Mode.NORMAL
+            self.conversation.add_user(EXECUTE_DIRECTIVE)
+            self.console.print("[dim]已切回执行模式，正在按计划执行...[/dim]")
+            # 触发 Agent 执行
+            asyncio.create_task(self._submit(EXECUTE_DIRECTIVE))
+
         else:
             self.console.print(
                 f"[yellow]未知命令: {cmd}，输入 /help 查看可用命令[/yellow]"
@@ -198,16 +225,20 @@ class ForgeApp:
 
     async def _submit(self, text: str) -> None:
         """用户提交消息 → Agent 接管。"""
-        self.conversation.add_user(text)
+        # /do 场景下文本已由命令处理器加入
+        if text != EXECUTE_DIRECTIVE:
+            self.conversation.add_user(text)
 
-        # 开始计时
+        # 开始计时 + 创建取消事件
         self._response_start = time.time()
         self._response_elapsed = 0
+        self._turn_cancel = asyncio.Event()
+        self._iter = 0
 
         self.console.print()
         self.console.print(f"[bold cyan]👤 你:[/bold cyan] {text}")
 
-        # 启动实时计时器（首次 token 前显示 "Imagining… (Ns)"）
+        # 启动实时计时器
         timer_task = asyncio.create_task(self._show_imagining())
 
         # 创建 Agent 并消费事件流
@@ -215,10 +246,10 @@ class ForgeApp:
         cur_text = ""
         in_thinking = False
         thinking_shown_header = False
-        first_content = False  # 首个文本/思考/工具事件
+        first_content = False
 
         try:
-            async for ev in agent.run(self.conversation):
+            async for ev in agent.run(self.conversation, self.mode, self._turn_cancel):
                 if ev.thinking:
                     self._on_first_content(timer_task, first_content)
                     first_content = True
@@ -265,11 +296,18 @@ class ForgeApp:
                     elif ev.tool.phase == Phase.END:
                         self._render_tool_end(ev.tool)
 
+                elif ev.iter > 0:
+                    self._iter = ev.iter
+
+                elif ev.notice:
+                    self.console.print()
+                    self.console.print(f"[dim]{ev.notice}[/dim]")
+
                 elif ev.done:
                     self._on_first_content(timer_task, first_content)
                     self._response_elapsed = time.time() - self._response_start
                     if cur_text.strip():
-                        self.console.print()  # 结束流式行的光标
+                        self.console.print()
                         self.console.print(Markdown(cur_text))
 
                 elif ev.err:
@@ -303,7 +341,10 @@ class ForgeApp:
             while True:
                 await asyncio.sleep(0.1)
                 elapsed = time.time() - self._response_start
-                sys.stdout.write(f"\r🤖 Imagining… ({elapsed:.0f}s)")
+                iter_str = f" · 第{self._iter}轮" if self._iter > 0 else ""
+                sys.stdout.write(
+                    f"\r🤖 Imagining… ({elapsed:.0f}s{iter_str})"
+                )
                 sys.stdout.flush()
         except asyncio.CancelledError:
             pass
@@ -364,19 +405,24 @@ class ForgeApp:
         provider_name = self.config.active_provider_name
         model_name = self._active_model()
 
+        # 模式标记
+        mode_str = " PLAN" if self.mode == Mode.PLAN else ""
+
         # token 用量
         it = self._total_input_tokens
         ot = self._total_output_tokens
         tok_str = f"↑{_fmt_tok(it)} ↓{_fmt_tok(ot)}"
 
-        # 响应耗时（只在轮次完成时显示）
+        # 响应耗时 + 轮次
         if self._response_elapsed > 0:
             elapsed = f"{self._response_elapsed:.1f}s"
+        elif self._iter > 0:
+            elapsed = f"第{self._iter}轮..."
         else:
             elapsed = "..."
 
         bar = (
-            f" {provider_name} │ {model_name} │ {tok_str} │ {elapsed} "
+            f" {provider_name}{mode_str} │ {model_name} │ {tok_str} │ {elapsed} "
         )
         return [("class:bottom-toolbar.text", bar)]
 

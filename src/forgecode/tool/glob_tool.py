@@ -11,6 +11,8 @@ from forgecode.tool import Result, _parse_args
 class GlobTool:
     """按 glob 模式匹配文件路径。"""
 
+    read_only = True
+
     def name(self) -> str:
         return "glob"
 

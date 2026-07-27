@@ -28,13 +28,13 @@ class StreamEvent:
     text: str = ""
     thinking: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
-    usage: TokenUsage | None = None
+    usage: Usage | None = None
     done: bool = False
     err: Exception | None = None
 
 
 @dataclass
-class TokenUsage:
+class Usage:
     """一次 API 调用的 token 用量。"""
 
     input_tokens: int = 0
@@ -55,13 +55,16 @@ class BaseProvider(ABC):
         self,
         msgs: list[Message],
         tools: list[ToolDefinition],
+        system_suffix: str = "",
     ) -> AsyncIterator[StreamEvent]:
         """
         流式对话。tools 为空列表表示不带工具，续答时仍传入（单轮由上层控制）。
+        system_suffix 非空时拼接到内置 SYSTEM_PROMPT 之后（Plan Mode）。
 
         事件约定：
         - 文本增量由 StreamEvent.text 逐 token 产出
         - 工具调用在流结束前通过 StreamEvent.tool_calls 一次性产出
+        - usage 非空：本轮 token 用量，done 之前一次性发出
         - 流正常结束时产出 StreamEvent(done=True)
         - 出错时产出 StreamEvent(err=...)，不抛异常
         """

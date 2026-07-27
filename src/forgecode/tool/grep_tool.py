@@ -12,6 +12,8 @@ from forgecode.tool import Result, _parse_args
 class GrepTool:
     """在文件中搜索匹配正则表达式的内容。"""
 
+    read_only = True
+
     def name(self) -> str:
         return "grep"
 

@@ -16,7 +16,15 @@ from forgecode.conversation.history import (
     ToolCall,
     ToolDefinition,
 )
-from forgecode.providers import BaseProvider, StreamEvent, TokenUsage
+from forgecode.prompt import SYSTEM_PROMPT
+from forgecode.providers import BaseProvider, StreamEvent, Usage
+
+
+def _effective_system(suffix: str) -> str:
+    """拼接系统提示词与后缀（Plan Mode）。"""
+    if not suffix:
+        return SYSTEM_PROMPT
+    return SYSTEM_PROMPT + "\n\n" + suffix
 
 
 class OpenAIProvider(BaseProvider):
@@ -33,15 +41,17 @@ class OpenAIProvider(BaseProvider):
         self,
         msgs: list[Message],
         tools: list[ToolDefinition],
+        system_suffix: str = "",
     ) -> AsyncIterator[StreamEvent]:
-        return self._stream_impl(msgs, tools)
+        return self._stream_impl(msgs, tools, system_suffix)
 
     async def _stream_impl(
         self,
         msgs: list[Message],
         tools: list[ToolDefinition],
+        system_suffix: str = "",
     ) -> AsyncIterator[StreamEvent]:
-        api_messages = _to_openai_messages(msgs)
+        api_messages = _to_openai_messages(msgs, system_suffix)
 
         params: dict = {
             "model": self.config.model,
@@ -125,7 +135,7 @@ class OpenAIProvider(BaseProvider):
                 # 提取 token 用量
                 if usage_chunk is not None:
                     yield StreamEvent(
-                        usage=TokenUsage(
+                        usage=Usage(
                             input_tokens=usage_chunk.prompt_tokens,
                             output_tokens=usage_chunk.completion_tokens,
                         )
@@ -159,9 +169,10 @@ class OpenAIProvider(BaseProvider):
 # ── 消息格式转换 ──────────────────────────────────
 
 
-def _to_openai_messages(msgs: list[Message]) -> list[dict]:
+def _to_openai_messages(msgs: list[Message], suffix: str = "") -> list[dict]:
     """将内部 Message 列表转为 OpenAI API 格式。"""
-    result: list[dict] = []
+    system_text = _effective_system(suffix)
+    result: list[dict] = [{"role": "system", "content": system_text}]
     for m in msgs:
         if m.role == ROLE_USER:
             result.append({"role": "user", "content": m.content})

@@ -32,6 +32,8 @@ class Result:
 class Tool(Protocol):
     """统一工具抽象（F1）。"""
 
+    read_only: bool  # True=只读（可并发执行 & Plan Mode 放行）
+
     def name(self) -> str: ...
     def description(self) -> str: ...
     def parameters(self) -> dict[str, Any]: ...
@@ -100,6 +102,26 @@ class Registry:
                 )
             )
         return result
+
+    def read_only_definitions(self) -> list[ToolDefinition]:
+        """Plan Mode：只导出 read_only==True 的工具定义。"""
+        result: list[ToolDefinition] = []
+        for name in self._order:
+            tool = self._tools[name]
+            if getattr(tool, "read_only", False):
+                result.append(
+                    ToolDefinition(
+                        name=tool.name(),
+                        description=tool.description(),
+                        input_schema=tool.parameters(),
+                    )
+                )
+        return result
+
+    def is_read_only(self, name: str) -> bool:
+        """分批判定；未知工具返回 False。"""
+        t = self.get(name)
+        return t is not None and getattr(t, "read_only", False)
 
     async def execute(
         self, name: str, args: str, timeout: float = DEFAULT_TIMEOUT

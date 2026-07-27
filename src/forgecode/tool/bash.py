@@ -10,6 +10,8 @@ from forgecode.tool import Result, _parse_args, _truncate
 class BashTool:
     """执行 shell 命令，返回 stdout/stderr/exit_code。"""
 
+    read_only = False
+
     def name(self) -> str:
         return "bash"
 

@@ -93,6 +93,10 @@ class Conversation:
         """清空所有消息。"""
         self._messages.clear()
 
+    def last_role(self) -> str:
+        """返回最后一条消息的 role；空历史返回 ""。"""
+        return self._messages[-1].role if self._messages else ""
+
     @property
     def messages(self) -> list[Message]:
         """返回当前所有消息的副本。"""

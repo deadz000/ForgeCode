@@ -10,6 +10,8 @@ from forgecode.tool import Result, _parse_args
 class WriteFileTool:
     """写入内容到文件，父目录不存在时自动创建。"""
 
+    read_only = False
+
     def name(self) -> str:
         return "write_file"
 

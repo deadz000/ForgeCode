@@ -17,7 +17,15 @@ from forgecode.conversation.history import (
     ToolCall,
     ToolDefinition,
 )
-from forgecode.providers import BaseProvider, StreamEvent, TokenUsage
+from forgecode.prompt import SYSTEM_PROMPT
+from forgecode.providers import BaseProvider, StreamEvent, Usage
+
+
+def _effective_system(suffix: str) -> str:
+    """拼接系统提示词与后缀（Plan Mode）。"""
+    if not suffix:
+        return SYSTEM_PROMPT
+    return SYSTEM_PROMPT + "\n\n" + suffix
 
 
 class AnthropicProvider(BaseProvider):
@@ -34,13 +42,15 @@ class AnthropicProvider(BaseProvider):
         self,
         msgs: list[Message],
         tools: list[ToolDefinition],
+        system_suffix: str = "",
     ) -> AsyncIterator[StreamEvent]:
-        return self._stream_impl(msgs, tools)
+        return self._stream_impl(msgs, tools, system_suffix)
 
     async def _stream_impl(
         self,
         msgs: list[Message],
         tools: list[ToolDefinition],
+        system_suffix: str = "",
     ) -> AsyncIterator[StreamEvent]:
         api_messages = _to_anthropic_messages(msgs)
         has_tool_history = any(
@@ -51,6 +61,7 @@ class AnthropicProvider(BaseProvider):
             "model": self.config.model,
             "max_tokens": 4096,
             "messages": api_messages,
+            "system": _effective_system(system_suffix),
         }
 
         # 工具定义注入
@@ -97,7 +108,7 @@ class AnthropicProvider(BaseProvider):
                     # 提取 token 用量
                     if final_message.usage is not None:
                         yield StreamEvent(
-                            usage=TokenUsage(
+                            usage=Usage(
                                 input_tokens=final_message.usage.input_tokens,
                                 output_tokens=final_message.usage.output_tokens,
                             )

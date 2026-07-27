@@ -10,6 +10,8 @@ from forgecode.tool import Result, _parse_args
 class EditFileTool:
     """在文件中做唯一匹配替换。"""
 
+    read_only = False
+
     def name(self) -> str:
         return "edit_file"
 
