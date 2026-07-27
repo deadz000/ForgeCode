@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable, Coroutine
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any
@@ -66,8 +66,6 @@ class Event:
 
 # ── Agent ─────────────────────────────────────────
 
-PushFn = Callable[[Event], Coroutine[Any, Any, None]]
-
 
 class Agent:
     def __init__(self, provider: BaseProvider, registry: Registry) -> None:
@@ -83,12 +81,6 @@ class Agent:
         if cancel is None:
             cancel = asyncio.Event()
 
-        # push 闭包——子函数通过它往同一个 async generator 推事件
-        events: list[Event] = []
-
-        async def push(ev: Event) -> None:
-            events.append(ev)
-
         defs = (
             self._registry.read_only_definitions()
             if mode == Mode.PLAN
@@ -98,24 +90,20 @@ class Agent:
         unknown_run = 0
 
         for it in range(1, MAX_ITERATIONS + 1):
-            # flush pending events
-            for ev in events:
-                yield ev
-            events.clear()
-
             yield Event(iter=it)
 
             if cancel.is_set():
                 await _finish_cancelled(conv)
                 return
 
-            text, calls, usage, ok = await _stream_once(
-                self._provider, conv, defs, suffix, cancel, push
-            )
-            for ev in events:
+            # ── 流式请求 ──
+            result: dict[str, Any] = {}
+            async for ev in _stream_once(
+                self._provider, conv, defs, suffix, cancel, result
+            ):
                 yield ev
-            events.clear()
 
+            ok: bool = result.get("ok", False)
             if not ok:
                 if cancel.is_set():
                     await _finish_cancelled(conv)
@@ -123,14 +111,20 @@ class Agent:
                 await _ensure_assistant_tail(conv, NOTICE_STREAM_ERR)
                 return
 
+            text: str = result.get("text", "")
+            calls: list[ToolCall] = result.get("calls", [])
+            usage: Usage | None = result.get("usage")
+
             if usage is not None:
                 yield Event(usage=usage)
 
+            # ── 无工具 → 自然完成 ──
             if not calls:
                 conv.add_assistant(text or "（任务完成）")
                 yield Event(done=True)
                 return
 
+            # ── 有工具 → 执行 ──
             conv.add_assistant_with_tool_calls(text, calls)
 
             if _all_unknown(self._registry, calls):
@@ -138,13 +132,14 @@ class Agent:
             else:
                 unknown_run = 0
 
-            results, completed = await _execute_batched(
-                self._registry, calls, cancel, push
-            )
-            for ev in events:
+            batched_result: dict[str, Any] = {}
+            async for ev in _execute_batched(
+                self._registry, calls, cancel, batched_result
+            ):
                 yield ev
-            events.clear()
 
+            results: list[ToolResult] = batched_result.get("results", [])
+            completed: bool = batched_result.get("completed", False)
             conv.add_tool_results(results)
 
             if not completed:
@@ -157,12 +152,13 @@ class Agent:
                 yield Event(done=True)
                 return
 
+        # 迭代上限
         yield Event(notice=NOTICE_MAX_ITER)
         await _ensure_assistant_tail(conv, NOTICE_MAX_ITER)
         yield Event(done=True)
 
 
-# ── stream_once ───────────────────────────────────
+# ── stream_once（async generator） ────────────────
 
 
 async def _stream_once(
@@ -171,9 +167,9 @@ async def _stream_once(
     defs: list,
     suffix: str,
     cancel: asyncio.Event,
-    push: PushFn,
-) -> tuple[str, list[ToolCall], Usage | None, bool]:
-    """单轮流式请求。事件经 push 发出，返回 (text, calls, usage, ok)。"""
+    result: dict[str, Any],
+) -> AsyncIterator[Event]:
+    """单轮流式请求。事件实时 yield，结果通过 result dict 传回。"""
     text = ""
     calls: list[ToolCall] = []
     usage: Usage | None = None
@@ -181,18 +177,20 @@ async def _stream_once(
     try:
         async for se in provider.stream(conv.messages, defs, suffix):
             if cancel.is_set():
-                return "", [], None, False
+                result["ok"] = False
+                return
 
             if se.err is not None:
-                await push(Event(err=se.err))
-                return "", [], None, False
+                yield Event(err=se.err)
+                result["ok"] = False
+                return
 
             if se.text:
                 text += se.text
-                await push(Event(text=se.text))
+                yield Event(text=se.text)
 
             if se.thinking:
-                await push(Event(thinking=se.thinking))
+                yield Event(thinking=se.thinking)
 
             if se.tool_calls:
                 calls = se.tool_calls
@@ -203,29 +201,35 @@ async def _stream_once(
             if se.done:
                 break
     except Exception as e:
-        await push(Event(err=e))
-        return "", [], None, False
+        yield Event(err=e)
+        result["ok"] = False
+        return
 
-    return text, calls, usage, True
+    result["text"] = text
+    result["calls"] = calls
+    result["usage"] = usage
+    result["ok"] = True
 
 
-# ── execute_batched ───────────────────────────────
+# ── execute_batched（async generator） ────────────
 
 
 async def _execute_batched(
     registry: Registry,
     calls: list[ToolCall],
     cancel: asyncio.Event,
-    push: PushFn,
-) -> tuple[list[ToolResult], bool]:
-    """保序分批并发执行。"""
+    result: dict[str, Any],
+) -> AsyncIterator[Event]:
+    """保序分批并发执行。事件实时 yield，结果通过 result dict 传回。"""
     results: list[ToolResult | None] = [None] * len(calls)
     i = 0
 
     while i < len(calls):
         if cancel.is_set():
             _fill_cancelled(results, i)
-            return _pack_results(results), False
+            result["results"] = _pack_results(results)
+            result["completed"] = False
+            return
 
         if registry.is_read_only(calls[i].name):
             j = i
@@ -233,25 +237,23 @@ async def _execute_batched(
                 j += 1
 
             for k in range(i, j):
-                await push(
-                    Event(
-                        tool=ToolEvent(
-                            name=calls[k].name,
-                            args=_args_preview(calls[k].input),
-                            phase=Phase.START,
-                        )
+                yield Event(
+                    tool=ToolEvent(
+                        name=calls[k].name,
+                        args=_args_preview(calls[k].input),
+                        phase=Phase.START,
                     )
                 )
 
             async def _run_one(k: int) -> None:
                 call = calls[k]
-                result = await registry.execute(
+                exec_result = await registry.execute(
                     call.name, call.input, timeout=DEFAULT_TIMEOUT
                 )
                 tr = ToolResult(
                     tool_call_id=call.id,
-                    content=result.content,
-                    is_error=result.is_error,
+                    content=exec_result.content,
+                    is_error=exec_result.is_error,
                 )
                 results[k] = tr
 
@@ -260,51 +262,46 @@ async def _execute_batched(
             for k in range(i, j):
                 r = results[k]
                 assert r is not None
-                await push(
-                    Event(
-                        tool=ToolEvent(
-                            name=calls[k].name,
-                            phase=Phase.END,
-                            result=_summary(r.content),
-                            is_error=r.is_error,
-                        )
+                yield Event(
+                    tool=ToolEvent(
+                        name=calls[k].name,
+                        phase=Phase.END,
+                        result=_summary(r.content),
+                        is_error=r.is_error,
                     )
                 )
 
             i = j
         else:
             call = calls[i]
-            await push(
-                Event(
-                    tool=ToolEvent(
-                        name=call.name,
-                        args=_args_preview(call.input),
-                        phase=Phase.START,
-                    )
+            yield Event(
+                tool=ToolEvent(
+                    name=call.name,
+                    args=_args_preview(call.input),
+                    phase=Phase.START,
                 )
             )
-            result = await registry.execute(
+            exec_result = await registry.execute(
                 call.name, call.input, timeout=DEFAULT_TIMEOUT
             )
             tr = ToolResult(
                 tool_call_id=call.id,
-                content=result.content,
-                is_error=result.is_error,
+                content=exec_result.content,
+                is_error=exec_result.is_error,
             )
             results[i] = tr
-            await push(
-                Event(
-                    tool=ToolEvent(
-                        name=call.name,
-                        phase=Phase.END,
-                        result=_summary(result.content),
-                        is_error=result.is_error,
-                    )
+            yield Event(
+                tool=ToolEvent(
+                    name=call.name,
+                    phase=Phase.END,
+                    result=_summary(exec_result.content),
+                    is_error=exec_result.is_error,
                 )
             )
             i += 1
 
-    return _pack_results(results), True
+    result["results"] = _pack_results(results)
+    result["completed"] = True
 
 
 # ── 辅助函数 ──────────────────────────────────────
