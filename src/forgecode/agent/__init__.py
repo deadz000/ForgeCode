@@ -11,7 +11,7 @@ from forgecode.conversation.history import (
     ToolCall,
     ToolResult,
 )
-from forgecode.providers import BaseProvider
+from forgecode.providers import BaseProvider, TokenUsage
 from forgecode.tool import DEFAULT_TIMEOUT, Registry
 
 # ── Agent 事件 ────────────────────────────────────
@@ -40,6 +40,7 @@ class Event:
     text: str = ""
     thinking: str = ""
     tool: ToolEvent | None = None
+    usage: TokenUsage | None = None
     done: bool = False
     err: Exception | None = None
 
@@ -74,6 +75,8 @@ class Agent:
                     yield Event(thinking=se.thinking)
                 if se.tool_calls:
                     tool_calls = se.tool_calls
+                if se.usage:
+                    yield Event(usage=se.usage)
                 if se.done:
                     break
         except Exception as e:
@@ -141,6 +144,8 @@ class Agent:
                     yield Event(text=se.text)
                 if se.thinking:
                     yield Event(thinking=se.thinking)
+                if se.usage:
+                    yield Event(usage=se.usage)
                 # 忽略第二次的任何 tool_calls（单轮上限 AC9）
                 if se.done:
                     break

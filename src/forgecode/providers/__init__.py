@@ -20,6 +20,7 @@ class StreamEvent:
     - text 非空：文本增量（逐 token 产出）
     - thinking 非空：思考增量（逐 token 产出）
     - tool_calls 非空：本轮模型请求的工具调用列表（done 之前发出）
+    - usage 非 None：本轮 token 用量（在 done 之前填充）
     - done=True：本轮流结束
     - err 非 None：出错（不中断会话，由上层处理）
     """
@@ -27,8 +28,17 @@ class StreamEvent:
     text: str = ""
     thinking: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
+    usage: TokenUsage | None = None
     done: bool = False
     err: Exception | None = None
+
+
+@dataclass
+class TokenUsage:
+    """一次 API 调用的 token 用量。"""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 # ── 抽象基类 ──────────────────────────────────────

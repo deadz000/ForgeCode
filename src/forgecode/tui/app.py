@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
@@ -60,7 +61,12 @@ class ForgeApp:
         self.console = Console()
         self._show_thinking: bool = False
         self._exit_flag: bool = False
-        self._stream_task: asyncio.Task[None] | None = None
+        # token 用量累计
+        self._total_input_tokens: int = 0
+        self._total_output_tokens: int = 0
+        # 当前轮次计时
+        self._response_start: float = 0
+        self._response_elapsed: float = 0
 
     # ── 启动 ───────────────────────────────────────
 
@@ -190,6 +196,10 @@ class ForgeApp:
         """用户提交消息 → Agent 接管。"""
         self.conversation.add_user(text)
 
+        # 开始计时
+        self._response_start = time.time()
+        self._response_elapsed = 0
+
         self.console.print()
         self.console.print(f"[bold cyan]👤 你:[/bold cyan] {text}")
         self.console.print()
@@ -224,6 +234,11 @@ class ForgeApp:
                     # 静默累积文本，等完成后用 Markdown 渲染
                     cur_text += ev.text
 
+                elif ev.usage is not None:
+                    # 累计 token 用量
+                    self._total_input_tokens += ev.usage.input_tokens
+                    self._total_output_tokens += ev.usage.output_tokens
+
                 elif ev.tool is not None:
                     in_thinking = False
                     thinking_shown_header = False
@@ -238,6 +253,7 @@ class ForgeApp:
                         self._render_tool_end(ev.tool)
 
                 elif ev.done:
+                    self._response_elapsed = time.time() - self._response_start
                     if cur_text.strip():
                         self._render_markdown(cur_text)
                         cur_text = ""
@@ -307,11 +323,21 @@ class ForgeApp:
     def _status_bar(self) -> list[tuple[str, str]]:
         provider_name = self.config.active_provider_name
         model_name = self._active_model()
-        total_width = 60
-        left = f" {provider_name} "
-        right = f" {model_name} "
-        padding = " " * max(1, total_width - len(left) - len(right))
-        bar = left + padding + right
+
+        # token 用量
+        it = self._total_input_tokens
+        ot = self._total_output_tokens
+        tok_str = f"↑{_fmt_tok(it)} ↓{_fmt_tok(ot)}"
+
+        # 响应耗时（只在轮次完成时显示）
+        if self._response_elapsed > 0:
+            elapsed = f"{self._response_elapsed:.1f}s"
+        else:
+            elapsed = "..."
+
+        bar = (
+            f" {provider_name} │ {model_name} │ {tok_str} │ {elapsed} "
+        )
         return [("class:bottom-toolbar.text", bar)]
 
     def _active_model(self) -> str:
@@ -319,3 +345,13 @@ class ForgeApp:
             if p.name == self.config.active_provider_name:
                 return p.model
         return "?"
+
+
+# ── 辅助 ──────────────────────────────────────────
+
+
+def _fmt_tok(n: int) -> str:
+    """格式化 token 数为可读形式。"""
+    if n >= 1000:
+        return f"{n / 1000:.1f}k"
+    return str(n)

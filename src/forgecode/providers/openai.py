@@ -16,7 +16,7 @@ from forgecode.conversation.history import (
     ToolCall,
     ToolDefinition,
 )
-from forgecode.providers import BaseProvider, StreamEvent
+from forgecode.providers import BaseProvider, StreamEvent, TokenUsage
 
 
 class OpenAIProvider(BaseProvider):
@@ -70,8 +70,12 @@ class OpenAIProvider(BaseProvider):
 
                 # 按 index 累加 tool_calls 参数
                 tool_calls_buf: dict[int, dict[str, str]] = {}
+                usage_chunk = None
 
                 async for chunk in stream:
+                    # 捕获 usage 信息（include_usage 模式下最后 chunk 的 choices 为空）
+                    if chunk.usage is not None:
+                        usage_chunk = chunk.usage
                     if not chunk.choices:
                         continue
 
@@ -117,6 +121,15 @@ class OpenAIProvider(BaseProvider):
                             )
                         )
                     yield StreamEvent(tool_calls=calls)
+
+                # 提取 token 用量
+                if usage_chunk is not None:
+                    yield StreamEvent(
+                        usage=TokenUsage(
+                            input_tokens=usage_chunk.prompt_tokens,
+                            output_tokens=usage_chunk.completion_tokens,
+                        )
+                    )
 
                 yield StreamEvent(done=True)
                 return

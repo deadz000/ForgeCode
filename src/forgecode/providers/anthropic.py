@@ -17,7 +17,7 @@ from forgecode.conversation.history import (
     ToolCall,
     ToolDefinition,
 )
-from forgecode.providers import BaseProvider, StreamEvent
+from forgecode.providers import BaseProvider, StreamEvent, TokenUsage
 
 
 class AnthropicProvider(BaseProvider):
@@ -79,7 +79,7 @@ class AnthropicProvider(BaseProvider):
                                 yield StreamEvent(thinking=event.delta.thinking)
                             # input_json_delta → 跳过（SDK 内部累加）
 
-                    # 流结束后取工具调用
+                    # 流结束后取工具调用 + token 用量
                     final_message = await stream.get_final_message()
                     calls: list[ToolCall] = []
                     for block in final_message.content:
@@ -93,6 +93,15 @@ class AnthropicProvider(BaseProvider):
                             )
                     if calls:
                         yield StreamEvent(tool_calls=calls)
+
+                    # 提取 token 用量
+                    if final_message.usage is not None:
+                        yield StreamEvent(
+                            usage=TokenUsage(
+                                input_tokens=final_message.usage.input_tokens,
+                                output_tokens=final_message.usage.output_tokens,
+                            )
+                        )
 
                     yield StreamEvent(done=True)
                 return
