@@ -94,7 +94,7 @@ class ForgeApp:
                 )
             except KeyboardInterrupt:
                 self.console.print()
-                self.console.print("[dim]按 /exit 或 Ctrl+C 再次退出[/dim]")
+                self._exit_flag = True
                 continue
             except EOFError:
                 self.console.print()
@@ -108,7 +108,11 @@ class ForgeApp:
             if user_input.startswith("/"):
                 self._handle_command(user_input)
             else:
-                await self._submit(user_input)
+                try:
+                    await self._submit(user_input)
+                except asyncio.CancelledError:
+                    self.console.print()
+                    self.console.print("[dim]已中断[/dim]")
 
     # ── 命令处理 ──────────────────────────────────
 
@@ -202,17 +206,22 @@ class ForgeApp:
 
         self.console.print()
         self.console.print(f"[bold cyan]👤 你:[/bold cyan] {text}")
-        self.console.print()
+
+        # 启动实时计时器（首次 token 前显示 "Imagining… (Ns)"）
+        timer_task = asyncio.create_task(self._show_imagining())
 
         # 创建 Agent 并消费事件流
         agent = Agent(self.provider, self.registry)
         cur_text = ""
         in_thinking = False
         thinking_shown_header = False
+        first_content = False  # 首个文本/思考/工具事件
 
         try:
             async for ev in agent.run(self.conversation):
                 if ev.thinking:
+                    self._on_first_content(timer_task, first_content)
+                    first_content = True
                     if not in_thinking:
                         in_thinking = True
                     if self._show_thinking:
@@ -227,23 +236,27 @@ class ForgeApp:
                         thinking_shown_header = True
 
                 elif ev.text:
+                    self._on_first_content(timer_task, first_content)
+                    first_content = True
                     if in_thinking:
                         in_thinking = False
                         if self._show_thinking:
                             self.console.print()
-                    # 静默累积文本，等完成后用 Markdown 渲染
+                    # 流式打字 + 累积（done 时追加 Markdown 渲染）
                     cur_text += ev.text
+                    self._stream_text(ev.text)
 
                 elif ev.usage is not None:
-                    # 累计 token 用量
                     self._total_input_tokens += ev.usage.input_tokens
                     self._total_output_tokens += ev.usage.output_tokens
 
                 elif ev.tool is not None:
+                    self._on_first_content(timer_task, first_content)
+                    first_content = True
                     in_thinking = False
                     thinking_shown_header = False
                     if cur_text.strip():
-                        self._render_markdown(cur_text)
+                        self.console.print()
                         cur_text = ""
 
                     if ev.tool.phase == Phase.START:
@@ -253,23 +266,56 @@ class ForgeApp:
                         self._render_tool_end(ev.tool)
 
                 elif ev.done:
+                    self._on_first_content(timer_task, first_content)
                     self._response_elapsed = time.time() - self._response_start
                     if cur_text.strip():
-                        self._render_markdown(cur_text)
-                        cur_text = ""
+                        self.console.print()  # 结束流式行的光标
+                        self.console.print(Markdown(cur_text))
 
                 elif ev.err:
+                    self._on_first_content(timer_task, first_content)
                     if cur_text.strip():
-                        self._render_markdown(cur_text)
-                        cur_text = ""
+                        self.console.print()
                     self.console.print(f"[red]✕ {ev.err}[/red]")
 
+        except asyncio.CancelledError:
+            timer_task.cancel()
+            if cur_text.strip():
+                self.console.print(cur_text)
+            self.console.print()
+            self.console.print("[dim]已中断[/dim]")
         except Exception as e:
+            timer_task.cancel()
             if cur_text.strip():
                 self.console.print(cur_text)
             self.console.print(f"[red]✕ 对话出错: {e}[/red]")
 
+        timer_task.cancel()
         self.console.print()
+
+    # ── 响应计时器 ────────────────────────────────
+
+    async def _show_imagining(self) -> None:
+        """实时显示 'Imagining… (Ns)'，秒数递增。"""
+        sys.stdout.write("\n🤖 Imagining… (0s)")
+        sys.stdout.flush()
+        try:
+            while True:
+                await asyncio.sleep(0.1)
+                elapsed = time.time() - self._response_start
+                sys.stdout.write(f"\r🤖 Imagining… ({elapsed:.0f}s)")
+                sys.stdout.flush()
+        except asyncio.CancelledError:
+            pass
+
+    @staticmethod
+    def _on_first_content(timer_task: asyncio.Task, first: bool) -> None:
+        """首次收到内容时取消计时器，结束 \\r 状态行。"""
+        if not first:
+            timer_task.cancel()
+            # 换行结束 Imagining 行，后续内容正常输出
+            sys.stdout.write("\n")
+            sys.stdout.flush()
 
     # ── 工具行渲染 ────────────────────────────────
 
@@ -289,13 +335,7 @@ class ForgeApp:
         if len(tool.result.split("\n")) > 8:
             self.console.print("  [dim]⎿ ...[/dim]")
 
-    # ── Markdown 渲染 ────────────────────────────
-
-    def _render_markdown(self, text: str) -> None:
-        """用 Rich Markdown 渲染文本（代码高亮、列表等）。"""
-        self.console.print(Markdown(text))
-
-    # ── 流式输出（仅用于思考内容） ─────────────────
+    # ── 流式输出 ──────────────────────────────────
 
     @staticmethod
     def _stream_text(text: str) -> None:
