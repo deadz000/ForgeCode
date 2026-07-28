@@ -70,13 +70,9 @@ def test_add_assistant_with_tool_calls():
 
 def test_add_tool_results():
     conv = Conversation()
-    results = [
-        ToolResult(tool_call_id="c1", content="file content", is_error=False)
-    ]
+    results = [ToolResult(tool_call_id="c1", content="file content", is_error=False)]
     conv.add_user("test")
-    conv.add_assistant_with_tool_calls(
-        "", [ToolCall(id="c1", name="r", input="{}")]
-    )
+    conv.add_assistant_with_tool_calls("", [ToolCall(id="c1", name="r", input="{}")])
     conv.add_tool_results(results)
     conv.add_assistant("done")
 

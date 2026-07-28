@@ -71,9 +71,7 @@ class Conversation:
         """追加 assistant 纯文本回合。"""
         self._messages.append(Message(role=ROLE_ASSISTANT, content=text))
 
-    def add_assistant_with_tool_calls(
-        self, text: str, calls: list[ToolCall]
-    ) -> None:
+    def add_assistant_with_tool_calls(self, text: str, calls: list[ToolCall]) -> None:
         """追加 assistant 工具调用回合。"""
         self._messages.append(
             Message(
@@ -85,9 +83,7 @@ class Conversation:
 
     def add_tool_results(self, results: list[ToolResult]) -> None:
         """追加工具结果回合。"""
-        self._messages.append(
-            Message(role=ROLE_TOOL, tool_results=list(results))
-        )
+        self._messages.append(Message(role=ROLE_TOOL, tool_results=list(results)))
 
     def clear(self) -> None:
         """清空所有消息。"""

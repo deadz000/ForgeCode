@@ -1,0 +1,39 @@
+"""系统提示工程化：模块化装配、环境采集、补充消息注入。"""
+
+from __future__ import annotations
+
+from forgecode.prompt.environment import Environment, gather_environment
+from forgecode.prompt.modules import Module, fixed_modules, optional_modules
+from forgecode.prompt.reminder import (
+    EXECUTE_DIRECTIVE,
+    plan_reminder,
+    system_reminder,
+)
+
+
+def assemble_system(mods: list[Module]) -> str:
+    """按 priority 升序排列、跳过空 content、以空行连接为完整系统提示。"""
+    sorted_mods = sorted(mods, key=lambda m: m.priority)
+    non_empty = [m.content for m in sorted_mods if m.content]
+    return "\n\n".join(non_empty)
+
+
+def build_system_prompt() -> str:
+    """装配完整系统提示 = fixed_modules() + optional_modules()。"""
+    return assemble_system(fixed_modules() + optional_modules())
+
+
+# ── 顶层导出 ────────────────────────────────────────
+
+__all__ = [
+    "Module",
+    "fixed_modules",
+    "optional_modules",
+    "assemble_system",
+    "build_system_prompt",
+    "Environment",
+    "gather_environment",
+    "system_reminder",
+    "plan_reminder",
+    "EXECUTE_DIRECTIVE",
+]

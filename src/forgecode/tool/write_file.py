@@ -16,10 +16,7 @@ class WriteFileTool:
         return "write_file"
 
     def description(self) -> str:
-        return (
-            "将内容写入指定文件（覆盖已有内容）。"
-            "如果父目录不存在，会自动创建。"
-        )
+        return "将内容写入指定文件（覆盖已有内容）。如果父目录不存在，会自动创建。"
 
     def parameters(self) -> dict:
         return {

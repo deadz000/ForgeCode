@@ -13,14 +13,15 @@ from forgecode.conversation.history import (
     ToolCall,
     ToolResult,
 )
-from forgecode.prompt import PLAN_MODE_REMINDER
-from forgecode.providers import BaseProvider, Usage
+from forgecode.prompt import build_system_prompt, gather_environment, plan_reminder
+from forgecode.providers import BaseProvider, Request, System, Usage
 from forgecode.tool import DEFAULT_TIMEOUT, Registry
 
 # ── 常量 ──────────────────────────────────────────
 
 MAX_ITERATIONS: int = 25
 MAX_UNKNOWN_RUN: int = 3
+PLAN_REMINDER_INTERVAL: int = 4  # 每隔 N 轮重复一次完整规划提醒
 
 NOTICE_MAX_ITER = "（已达最大迭代轮数 25，自动停止；可继续发消息推进。）"
 NOTICE_UNKNOWN_TOOLS = "（连续多轮只请求到未注册的工具，自动停止。）"
@@ -68,9 +69,10 @@ class Event:
 
 
 class Agent:
-    def __init__(self, provider: BaseProvider, registry: Registry) -> None:
+    def __init__(self, provider: BaseProvider, registry: Registry, version: str = "") -> None:
         self._provider = provider
         self._registry = registry
+        self._version = version
 
     async def run(
         self,
@@ -81,12 +83,16 @@ class Agent:
         if cancel is None:
             cancel = asyncio.Event()
 
+        # ── 采集环境 + 装配稳定系统提示 ──
+        env = gather_environment(self._version, self._provider.config.model)
+        env_text = env.render()
+        sys = build_system_prompt()
+
         defs = (
             self._registry.read_only_definitions()
             if mode == Mode.PLAN
             else self._registry.definitions()
         )
-        suffix = PLAN_MODE_REMINDER if mode == Mode.PLAN else ""
         unknown_run = 0
 
         for it in range(1, MAX_ITERATIONS + 1):
@@ -96,10 +102,16 @@ class Agent:
                 await _finish_cancelled(conv)
                 return
 
+            # ── 按轮次计算 reminder ──
+            reminder = ""
+            if mode == Mode.PLAN:
+                full = it == 1 or (it - 1) % PLAN_REMINDER_INTERVAL == 0
+                reminder = plan_reminder(full)
+
             # ── 流式请求 ──
             result: dict[str, Any] = {}
             async for ev in _stream_once(
-                self._provider, conv, defs, suffix, cancel, result
+                self._provider, conv, sys, env_text, defs, reminder, cancel, result
             ):
                 yield ev
 
@@ -133,9 +145,7 @@ class Agent:
                 unknown_run = 0
 
             batched_result: dict[str, Any] = {}
-            async for ev in _execute_batched(
-                self._registry, calls, cancel, batched_result
-            ):
+            async for ev in _execute_batched(self._registry, calls, cancel, batched_result):
                 yield ev
 
             results: list[ToolResult] = batched_result.get("results", [])
@@ -164,8 +174,10 @@ class Agent:
 async def _stream_once(
     provider: BaseProvider,
     conv: Conversation,
+    sys: str,
+    env_text: str,
     defs: list,
-    suffix: str,
+    reminder: str,
     cancel: asyncio.Event,
     result: dict[str, Any],
 ) -> AsyncIterator[Event]:
@@ -174,8 +186,15 @@ async def _stream_once(
     calls: list[ToolCall] = []
     usage: Usage | None = None
 
+    req = Request(
+        messages=conv.messages,
+        tools=defs,
+        system=System(stable=sys, environment=env_text),
+        reminder=reminder,
+    )
+
     try:
-        async for se in provider.stream(conv.messages, defs, suffix):
+        async for se in provider.stream(req):
             if cancel.is_set():
                 result["ok"] = False
                 return
@@ -247,9 +266,7 @@ async def _execute_batched(
 
             async def _run_one(k: int) -> None:
                 call = calls[k]
-                exec_result = await registry.execute(
-                    call.name, call.input, timeout=DEFAULT_TIMEOUT
-                )
+                exec_result = await registry.execute(call.name, call.input, timeout=DEFAULT_TIMEOUT)
                 tr = ToolResult(
                     tool_call_id=call.id,
                     content=exec_result.content,
@@ -281,9 +298,7 @@ async def _execute_batched(
                     phase=Phase.START,
                 )
             )
-            exec_result = await registry.execute(
-                call.name, call.input, timeout=DEFAULT_TIMEOUT
-            )
+            exec_result = await registry.execute(call.name, call.input, timeout=DEFAULT_TIMEOUT)
             tr = ToolResult(
                 tool_call_id=call.id,
                 content=exec_result.content,
@@ -323,11 +338,7 @@ def _summary(content: str) -> str:
 
 def _pack_results(results: list[ToolResult | None]) -> list[ToolResult]:
     return [
-        r
-        if r is not None
-        else ToolResult(
-            tool_call_id="", content=NOTICE_CANCELLED, is_error=True
-        )
+        r if r is not None else ToolResult(tool_call_id="", content=NOTICE_CANCELLED, is_error=True)
         for r in results
     ]
 
@@ -335,9 +346,7 @@ def _pack_results(results: list[ToolResult | None]) -> list[ToolResult]:
 def _fill_cancelled(results: list[ToolResult | None], start: int) -> None:
     for k in range(start, len(results)):
         if results[k] is None:
-            results[k] = ToolResult(
-                tool_call_id="", content=NOTICE_CANCELLED, is_error=True
-            )
+            results[k] = ToolResult(tool_call_id="", content=NOTICE_CANCELLED, is_error=True)
 
 
 def _all_unknown(registry: Registry, calls: list[ToolCall]) -> bool:

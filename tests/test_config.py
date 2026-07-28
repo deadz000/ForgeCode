@@ -8,8 +8,11 @@ from forgecode.config.schema import AppConfig, ProviderConfig
 
 def test_provider_config_defaults():
     cfg = ProviderConfig(
-        name="test", protocol="openai", model="gpt-4o",
-        base_url="https://api.openai.com/v1", api_key="sk-test",
+        name="test",
+        protocol="openai",
+        model="gpt-4o",
+        base_url="https://api.openai.com/v1",
+        api_key="sk-test",
     )
     assert cfg.thinking is False
 
@@ -17,8 +20,11 @@ def test_provider_config_defaults():
 def test_app_config():
     providers = [
         ProviderConfig(
-            name="p1", protocol="anthropic", model="m1",
-            base_url="b1", api_key="k1",
+            name="p1",
+            protocol="anthropic",
+            model="m1",
+            base_url="b1",
+            api_key="k1",
         )
     ]
     cfg = AppConfig(providers=providers, active_provider_name="p1")
@@ -62,8 +68,7 @@ def test_merge_configs_empty():
 def test_merge_configs_global_only():
     global_data = {
         "providers": [
-            {"name": "g", "protocol": "openai", "model": "m",
-             "base_url": "b", "api_key": "k"},
+            {"name": "g", "protocol": "openai", "model": "m", "base_url": "b", "api_key": "k"},
         ]
     }
     result = _merge_configs(global_data, None)
@@ -74,16 +79,31 @@ def test_merge_configs_global_only():
 def test_merge_configs_project_overrides_global():
     global_data = {
         "providers": [
-            {"name": "same", "protocol": "openai", "model": "global-model",
-             "base_url": "b", "api_key": "k"},
-            {"name": "only-global", "protocol": "anthropic", "model": "m",
-             "base_url": "b", "api_key": "k"},
+            {
+                "name": "same",
+                "protocol": "openai",
+                "model": "global-model",
+                "base_url": "b",
+                "api_key": "k",
+            },
+            {
+                "name": "only-global",
+                "protocol": "anthropic",
+                "model": "m",
+                "base_url": "b",
+                "api_key": "k",
+            },
         ]
     }
     project_data = {
         "providers": [
-            {"name": "same", "protocol": "openai", "model": "project-model",
-             "base_url": "b2", "api_key": "k2"},
+            {
+                "name": "same",
+                "protocol": "openai",
+                "model": "project-model",
+                "base_url": "b2",
+                "api_key": "k2",
+            },
         ]
     }
     result = _merge_configs(global_data, project_data)

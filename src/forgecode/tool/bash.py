@@ -20,6 +20,8 @@ class BashTool:
             "在工作目录下执行一个 shell 命令。"
             "返回标准输出、标准错误和退出码。"
             "命令执行受超时约束（默认 30 秒）。"
+            "读文件、找文件、搜内容请优先用 read_file / glob / grep，"
+            "不要用 bash 拼凑 cat / find / grep 命令来替代。"
         )
 
     def parameters(self) -> dict:

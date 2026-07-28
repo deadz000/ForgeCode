@@ -34,8 +34,11 @@ def test_stream_event_err():
 
 def test_create_anthropic_provider():
     cfg = ProviderConfig(
-        name="test", protocol="anthropic", model="claude-sonnet-5",
-        base_url="https://api.anthropic.com", api_key="sk-test",
+        name="test",
+        protocol="anthropic",
+        model="claude-sonnet-5",
+        base_url="https://api.anthropic.com",
+        api_key="sk-test",
     )
     p = create_provider(cfg)
     assert isinstance(p, AnthropicProvider)
@@ -44,8 +47,11 @@ def test_create_anthropic_provider():
 
 def test_create_openai_provider():
     cfg = ProviderConfig(
-        name="test", protocol="openai", model="gpt-4o",
-        base_url="https://api.openai.com/v1", api_key="sk-test",
+        name="test",
+        protocol="openai",
+        model="gpt-4o",
+        base_url="https://api.openai.com/v1",
+        api_key="sk-test",
     )
     p = create_provider(cfg)
     assert isinstance(p, OpenAIProvider)
@@ -54,8 +60,11 @@ def test_create_openai_provider():
 
 def test_create_provider_unsupported():
     cfg = ProviderConfig(
-        name="test", protocol="unknown", model="m",
-        base_url="b", api_key="k",
+        name="test",
+        protocol="unknown",
+        model="m",
+        base_url="b",
+        api_key="k",
     )
     with pytest.raises(ValueError, match="不支持的协议类型"):
         create_provider(cfg)

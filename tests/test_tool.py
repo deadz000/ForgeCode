@@ -15,8 +15,12 @@ def test_registry_definitions():
     assert len(defs) == 6
     names = [d.name for d in defs]
     assert names == [
-        "read_file", "write_file", "edit_file",
-        "bash", "glob", "grep",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "bash",
+        "glob",
+        "grep",
     ]
 
 
@@ -29,6 +33,7 @@ def test_registry_get():
 def test_registry_duplicate():
     reg = Registry()
     from forgecode.tool.read_file import ReadFileTool
+
     reg.register(ReadFileTool())
     with pytest.raises(ValueError, match="已注册"):
         reg.register(ReadFileTool())
@@ -50,9 +55,7 @@ async def test_read_file_exists():
 @pytest.mark.asyncio
 async def test_read_file_not_exists():
     reg = new_default_registry()
-    result = await reg.execute(
-        "read_file", '{"path": "/nonexistent/file.txt"}'
-    )
+    result = await reg.execute("read_file", '{"path": "/nonexistent/file.txt"}')
     assert result.is_error
     assert "不存在" in result.content
 
@@ -105,9 +108,7 @@ async def test_edit_file_unique_match(tmp_path):
 
     r = await reg.execute(
         "edit_file",
-        json.dumps(
-            {"path": str(test_file), "old_string": "hello", "new_string": "hi"}
-        ),
+        json.dumps({"path": str(test_file), "old_string": "hello", "new_string": "hi"}),
     )
     assert not r.is_error
     assert test_file.read_text() == "hi world"
@@ -121,9 +122,7 @@ async def test_edit_file_no_match(tmp_path):
 
     r = await reg.execute(
         "edit_file",
-        json.dumps(
-            {"path": str(test_file), "old_string": "xyz", "new_string": "a"}
-        ),
+        json.dumps({"path": str(test_file), "old_string": "xyz", "new_string": "a"}),
     )
     assert r.is_error
     assert "未找到匹配" in r.content
@@ -137,9 +136,7 @@ async def test_edit_file_multiple_match(tmp_path):
 
     r = await reg.execute(
         "edit_file",
-        json.dumps(
-            {"path": str(test_file), "old_string": "hello", "new_string": "hi"}
-        ),
+        json.dumps({"path": str(test_file), "old_string": "hello", "new_string": "hi"}),
     )
     assert r.is_error
     assert "不唯一" in r.content or "2 处" in r.content
@@ -161,9 +158,7 @@ async def test_bash_echo():
 async def test_bash_timeout():
     reg = new_default_registry()
     # 用极短超时来触发超时
-    result = await reg.execute(
-        "bash", '{"command": "sleep 10"}', timeout=0.5
-    )
+    result = await reg.execute("bash", '{"command": "sleep 10"}', timeout=0.5)
     assert result.is_error
     assert "超时" in result.content
 

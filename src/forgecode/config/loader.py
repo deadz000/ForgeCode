@@ -99,9 +99,7 @@ def load_config(provider_name: str | None = None) -> AppConfig:
         matching = [p for p in providers if p.name == provider_name]
         if not matching:
             names = ", ".join(p.name for p in providers)
-            raise ValueError(
-                f"未找到供应商 '{provider_name}'，可用: {names}"
-            )
+            raise ValueError(f"未找到供应商 '{provider_name}'，可用: {names}")
         active_name = matching[0].name
 
     return AppConfig(providers=providers, active_provider_name=active_name)

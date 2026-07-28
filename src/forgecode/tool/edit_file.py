@@ -20,6 +20,7 @@ class EditFileTool:
             "在文件中进行精确的字符串替换。"
             "old_string 必须在文件中恰好出现一次，"
             "否则返回含匹配次数的错误（模型可据此调整 old_string）。"
+            "编辑前请先用 read_file 读取目标文件，确认 old_string 唯一。"
         )
 
     def parameters(self) -> dict:
@@ -77,8 +78,7 @@ class EditFileTool:
             )
         if count > 1:
             return Result(
-                content=f"匹配到 {count} 处，old_string 不唯一。"
-                f"请提供更长上下文使其唯一。",
+                content=f"匹配到 {count} 处，old_string 不唯一。请提供更长上下文使其唯一。",
                 is_error=True,
             )
 

@@ -1,4 +1,4 @@
-"""Anthropic Claude Provider：流式对话 + 工具调用。"""
+"""Anthropic Claude Provider：流式对话 + 工具调用 + 缓存断点。"""
 
 from __future__ import annotations
 
@@ -15,21 +15,12 @@ from forgecode.conversation.history import (
     ROLE_USER,
     Message,
     ToolCall,
-    ToolDefinition,
 )
-from forgecode.prompt import SYSTEM_PROMPT
-from forgecode.providers import BaseProvider, StreamEvent, Usage
-
-
-def _effective_system(suffix: str) -> str:
-    """拼接系统提示词与后缀（Plan Mode）。"""
-    if not suffix:
-        return SYSTEM_PROMPT
-    return SYSTEM_PROMPT + "\n\n" + suffix
+from forgecode.providers import BaseProvider, Request, StreamEvent, Usage
 
 
 class AnthropicProvider(BaseProvider):
-    """封装 AsyncAnthropic，实现流式对话、extended thinking 和工具调用。"""
+    """封装 AsyncAnthropic，实现流式对话、extended thinking、缓存断点和工具调用。"""
 
     def __init__(self, config: ProviderConfig) -> None:
         super().__init__(config)
@@ -38,41 +29,53 @@ class AnthropicProvider(BaseProvider):
             api_key=config.api_key,
         )
 
-    def stream(
-        self,
-        msgs: list[Message],
-        tools: list[ToolDefinition],
-        system_suffix: str = "",
-    ) -> AsyncIterator[StreamEvent]:
-        return self._stream_impl(msgs, tools, system_suffix)
+    def stream(self, req: Request) -> AsyncIterator[StreamEvent]:
+        return self._stream_impl(req)
 
-    async def _stream_impl(
-        self,
-        msgs: list[Message],
-        tools: list[ToolDefinition],
-        system_suffix: str = "",
-    ) -> AsyncIterator[StreamEvent]:
-        api_messages = _to_anthropic_messages(msgs)
-        has_tool_history = any(
-            m.role == ROLE_TOOL or m.tool_calls for m in msgs
-        )
+    async def _stream_impl(self, req: Request) -> AsyncIterator[StreamEvent]:
+        # ── 构造 system（两块：stable 打断点，env 不打断点）──
+        system_blocks: list[dict] = []
+        if req.system.stable:
+            system_blocks.append(
+                {
+                    "type": "text",
+                    "text": req.system.stable,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            )
+        if req.system.environment:
+            system_blocks.append(
+                {
+                    "type": "text",
+                    "text": req.system.environment,
+                }
+            )
+
+        # ── 转换消息 ──
+        api_messages = _to_anthropic_messages(req.messages)
+
+        # ── 织入 reminder ──
+        if req.reminder:
+            _append_reminder_anthropic(api_messages, req.reminder)
+
+        has_tool_history = any(m.role == ROLE_TOOL or m.tool_calls for m in req.messages)
 
         params: dict = {
             "model": self.config.model,
             "max_tokens": 4096,
             "messages": api_messages,
-            "system": _effective_system(system_suffix),
+            "system": system_blocks,
         }
 
         # 工具定义注入
-        if tools:
+        if req.tools:
             params["tools"] = [
                 {
                     "name": t.name,
                     "description": t.description,
                     "input_schema": t.input_schema,
                 }
-                for t in tools
+                for t in req.tools
             ]
 
         # 含工具历史的请求不启用 thinking（避免 400）
@@ -105,12 +108,24 @@ class AnthropicProvider(BaseProvider):
                     if calls:
                         yield StreamEvent(tool_calls=calls)
 
-                    # 提取 token 用量
+                    # 提取 token 用量（含缓存字段）
                     if final_message.usage is not None:
                         yield StreamEvent(
                             usage=Usage(
                                 input_tokens=final_message.usage.input_tokens,
                                 output_tokens=final_message.usage.output_tokens,
+                                cache_write=getattr(
+                                    final_message.usage,
+                                    "cache_creation_input_tokens",
+                                    0,
+                                )
+                                or 0,
+                                cache_read=getattr(
+                                    final_message.usage,
+                                    "cache_read_input_tokens",
+                                    0,
+                                )
+                                or 0,
                             )
                         )
 
@@ -119,14 +134,10 @@ class AnthropicProvider(BaseProvider):
 
             except APIStatusError as e:
                 if e.status_code < 500:
-                    yield StreamEvent(
-                        err=Exception(f"API 错误 ({e.status_code}): {e.message}")
-                    )
+                    yield StreamEvent(err=Exception(f"API 错误 ({e.status_code}): {e.message}"))
                     return
                 if attempt == 1:
-                    yield StreamEvent(
-                        err=Exception(f"服务器错误 ({e.status_code}): {e.message}")
-                    )
+                    yield StreamEvent(err=Exception(f"服务器错误 ({e.status_code}): {e.message}"))
                     return
 
             except (httpx.HTTPError, httpx.NetworkError) as e:
@@ -180,3 +191,28 @@ def _to_anthropic_messages(msgs: list[Message]) -> list[dict]:
                 )
             result.append({"role": "user", "content": blocks})
     return result
+
+
+def _append_reminder_anthropic(messages: list[dict], reminder: str) -> None:
+    """将 reminder 织入最后一条消息的 content 块。
+
+    - 末条为 user（content 为 list 或 str）→ 追加文本块。
+    - 末条非 user（极端情形）→ 新起一条 user 消息。
+    """
+    if not messages:
+        messages.append({"role": "user", "content": reminder})
+        return
+
+    last = messages[-1]
+    if last.get("role") != "user":
+        messages.append({"role": "user", "content": reminder})
+        return
+
+    content = last["content"]
+    if isinstance(content, str):
+        last["content"] = [
+            {"type": "text", "text": content},
+            {"type": "text", "text": reminder},
+        ]
+    elif isinstance(content, list):
+        content.append({"type": "text", "text": reminder})

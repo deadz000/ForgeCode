@@ -18,10 +18,7 @@ class GrepTool:
         return "grep"
 
     def description(self) -> str:
-        return (
-            "在文件中搜索匹配正则表达式的内容。"
-            "返回 file:line:content 格式的命中列表。"
-        )
+        return "在文件中搜索匹配正则表达式的内容。返回 file:line:content 格式的命中列表。"
 
     def parameters(self) -> dict:
         return {
@@ -76,14 +73,10 @@ class GrepTool:
                         if len(hits) >= 100:
                             break
                         if len(line) > 1024 * 1024:
-                            hits.append(
-                                f"{filepath}:{lineno}:[该行过长，未完整搜索]"
-                            )
+                            hits.append(f"{filepath}:{lineno}:[该行过长，未完整搜索]")
                             continue
                         if rx.search(line):
-                            hits.append(
-                                f"{filepath}:{lineno}:{line.rstrip()}"
-                            )
+                            hits.append(f"{filepath}:{lineno}:{line.rstrip()}")
             except (OSError, UnicodeDecodeError):
                 continue
 

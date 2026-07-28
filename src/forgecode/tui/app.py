@@ -84,9 +84,7 @@ class ForgeApp:
         self._render_banner()
 
         history = InMemoryHistory()
-        session: PromptSession[str] = PromptSession(
-            history=history, style=PROMPT_STYLE
-        )
+        session: PromptSession[str] = PromptSession(history=history, style=PROMPT_STYLE)
 
         while not self._exit_flag:
             self.console.print(Rule(style="dim"))
@@ -164,15 +162,9 @@ class ForgeApp:
             self.console.print()
             lines: list[str] = []
             for p in self.config.providers:
-                marker = (
-                    " *" if p.name == self.config.active_provider_name else "  "
-                )
+                marker = " *" if p.name == self.config.active_provider_name else "  "
                 lines.append(f"{marker} {p.name}  ({p.protocol}/{p.model})")
-            self.console.print(
-                Panel(
-                    "\n".join(lines), title="供应商列表", border_style="dim"
-                )
-            )
+            self.console.print(Panel("\n".join(lines), title="供应商列表", border_style="dim"))
             self.console.print()
 
         elif cmd == "/switch":
@@ -187,9 +179,7 @@ class ForgeApp:
             new_config = matching[0]
             self.provider = create_provider(new_config)
             self.config.active_provider_name = new_config.name
-            self.console.print(
-                f"[green]已切换到 {new_config.name} ({new_config.model})[/green]"
-            )
+            self.console.print(f"[green]已切换到 {new_config.name} ({new_config.model})[/green]")
 
         elif cmd == "/thinking":
             arg = args.strip().lower()
@@ -205,8 +195,7 @@ class ForgeApp:
         elif cmd == "/plan":
             self.mode = Mode.PLAN
             self.console.print(
-                "[dim]已进入计划模式（仅只读工具），输入需求后产出计划。"
-                "用 /do 批准执行。[/dim]"
+                "[dim]已进入计划模式（仅只读工具），输入需求后产出计划。用 /do 批准执行。[/dim]"
             )
 
         elif cmd == "/do":
@@ -217,9 +206,7 @@ class ForgeApp:
             asyncio.create_task(self._submit(EXECUTE_DIRECTIVE))
 
         else:
-            self.console.print(
-                f"[yellow]未知命令: {cmd}，输入 /help 查看可用命令[/yellow]"
-            )
+            self.console.print(f"[yellow]未知命令: {cmd}，输入 /help 查看可用命令[/yellow]")
 
     # ── 提交消息 ──────────────────────────────────
 
@@ -242,7 +229,7 @@ class ForgeApp:
         timer_task = asyncio.create_task(self._show_imagining())
 
         # 创建 Agent 并消费事件流
-        agent = Agent(self.provider, self.registry)
+        agent = Agent(self.provider, self.registry, VERSION)
         cur_text = ""
         in_thinking = False
         thinking_shown_header = False
@@ -261,9 +248,7 @@ class ForgeApp:
                             thinking_shown_header = True
                         self._stream_text(ev.thinking)
                     elif not thinking_shown_header:
-                        self.console.print(
-                            "[dim]💭 思考中...（/thinking on 展开）[/dim]"
-                        )
+                        self.console.print("[dim]💭 思考中...（/thinking on 展开）[/dim]")
                         thinking_shown_header = True
 
                 elif ev.text:
@@ -342,9 +327,7 @@ class ForgeApp:
                 await asyncio.sleep(0.1)
                 elapsed = time.time() - self._response_start
                 iter_str = f" · 第{self._iter}轮" if self._iter > 0 else ""
-                sys.stdout.write(
-                    f"\r🤖 Imagining… ({elapsed:.0f}s{iter_str})"
-                )
+                sys.stdout.write(f"\r🤖 Imagining… ({elapsed:.0f}s{iter_str})")
                 sys.stdout.flush()
         except asyncio.CancelledError:
             pass
@@ -363,9 +346,7 @@ class ForgeApp:
     def _render_tool_start(self, tool: ToolEvent) -> None:
         """渲染工具调用开始行：● name(args)。"""
         self.console.print()
-        self.console.print(
-            f"[bold cyan]●[/bold cyan] [bold]{tool.name}[/bold]({tool.args})"
-        )
+        self.console.print(f"[bold cyan]●[/bold cyan] [bold]{tool.name}[/bold]({tool.args})")
 
     def _render_tool_end(self, tool: ToolEvent) -> None:
         """渲染工具结果摘要：缩进的 ⎿ 结果。"""
@@ -389,17 +370,13 @@ class ForgeApp:
         cwd = os.getcwd()
         home = os.path.expanduser("~")
         if cwd.startswith(home):
-            cwd = "~" + cwd[len(home):]
+            cwd = "~" + cwd[len(home) :]
 
         self.console.print()
         self.console.print(f"[bold blue]{ASCII_DOG}[/bold blue]")
-        self.console.print(
-            f"  [bold]ForgeCode[/bold] [dim]v{VERSION}[/dim]    {cwd}"
-        )
+        self.console.print(f"  [bold]ForgeCode[/bold] [dim]v{VERSION}[/dim]    {cwd}")
         self.console.print()
-        self.console.print(
-            "[dim]就绪 - 输入消息开始对话，/help 查看命令[/dim]"
-        )
+        self.console.print("[dim]就绪 - 输入消息开始对话，/help 查看命令[/dim]")
 
     def _status_bar(self) -> list[tuple[str, str]]:
         provider_name = self.config.active_provider_name
@@ -421,9 +398,7 @@ class ForgeApp:
         else:
             elapsed = "..."
 
-        bar = (
-            f" {provider_name}{mode_str} │ {model_name} │ {tok_str} │ {elapsed} "
-        )
+        bar = f" {provider_name}{mode_str} │ {model_name} │ {tok_str} │ {elapsed} "
         return [("class:bottom-toolbar.text", bar)]
 
     def _active_model(self) -> str:

@@ -12,19 +12,9 @@ from forgecode.conversation.history import (
     ROLE_ASSISTANT,
     ROLE_TOOL,
     ROLE_USER,
-    Message,
     ToolCall,
-    ToolDefinition,
 )
-from forgecode.prompt import SYSTEM_PROMPT
-from forgecode.providers import BaseProvider, StreamEvent, Usage
-
-
-def _effective_system(suffix: str) -> str:
-    """拼接系统提示词与后缀（Plan Mode）。"""
-    if not suffix:
-        return SYSTEM_PROMPT
-    return SYSTEM_PROMPT + "\n\n" + suffix
+from forgecode.providers import BaseProvider, Request, StreamEvent, Usage
 
 
 class OpenAIProvider(BaseProvider):
@@ -37,21 +27,11 @@ class OpenAIProvider(BaseProvider):
             api_key=config.api_key,
         )
 
-    def stream(
-        self,
-        msgs: list[Message],
-        tools: list[ToolDefinition],
-        system_suffix: str = "",
-    ) -> AsyncIterator[StreamEvent]:
-        return self._stream_impl(msgs, tools, system_suffix)
+    def stream(self, req: Request) -> AsyncIterator[StreamEvent]:
+        return self._stream_impl(req)
 
-    async def _stream_impl(
-        self,
-        msgs: list[Message],
-        tools: list[ToolDefinition],
-        system_suffix: str = "",
-    ) -> AsyncIterator[StreamEvent]:
-        api_messages = _to_openai_messages(msgs, system_suffix)
+    async def _stream_impl(self, req: Request) -> AsyncIterator[StreamEvent]:
+        api_messages = _to_openai_messages(req)
 
         params: dict = {
             "model": self.config.model,
@@ -61,7 +41,7 @@ class OpenAIProvider(BaseProvider):
         }
 
         # 工具定义注入
-        if tools:
+        if req.tools:
             params["tools"] = [
                 {
                     "type": "function",
@@ -71,7 +51,7 @@ class OpenAIProvider(BaseProvider):
                         "parameters": t.input_schema,
                     },
                 }
-                for t in tools
+                for t in req.tools
             ]
 
         for attempt in range(2):
@@ -96,10 +76,7 @@ class OpenAIProvider(BaseProvider):
                         yield StreamEvent(text=delta.content)
 
                     # 推理 tokens（o-series）
-                    if (
-                        hasattr(delta, "reasoning_content")
-                        and delta.reasoning_content
-                    ):
+                    if hasattr(delta, "reasoning_content") and delta.reasoning_content:
                         yield StreamEvent(thinking=delta.reasoning_content)
 
                     # 工具调用增量
@@ -107,9 +84,7 @@ class OpenAIProvider(BaseProvider):
                         for tc in delta.tool_calls:
                             idx = tc.index
                             if idx not in tool_calls_buf:
-                                tool_calls_buf[idx] = {
-                                    "id": "", "name": "", "args": ""
-                                }
+                                tool_calls_buf[idx] = {"id": "", "name": "", "args": ""}
                             buf = tool_calls_buf[idx]
                             if tc.id:
                                 buf["id"] = tc.id
@@ -132,12 +107,18 @@ class OpenAIProvider(BaseProvider):
                         )
                     yield StreamEvent(tool_calls=calls)
 
-                # 提取 token 用量
+                # 提取 token 用量（含缓存字段）
                 if usage_chunk is not None:
+                    cache_read = 0
+                    details = getattr(usage_chunk, "prompt_tokens_details", None)
+                    if details is not None:
+                        cache_read = getattr(details, "cached_tokens", 0) or 0
                     yield StreamEvent(
                         usage=Usage(
                             input_tokens=usage_chunk.prompt_tokens,
                             output_tokens=usage_chunk.completion_tokens,
+                            cache_write=0,
+                            cache_read=cache_read,
                         )
                     )
 
@@ -146,14 +127,10 @@ class OpenAIProvider(BaseProvider):
 
             except APIStatusError as e:
                 if e.status_code < 500:
-                    yield StreamEvent(
-                        err=Exception(f"API 错误 ({e.status_code}): {e.message}")
-                    )
+                    yield StreamEvent(err=Exception(f"API 错误 ({e.status_code}): {e.message}"))
                     return
                 if attempt == 1:
-                    yield StreamEvent(
-                        err=Exception(f"服务器错误 ({e.status_code}): {e.message}")
-                    )
+                    yield StreamEvent(err=Exception(f"服务器错误 ({e.status_code}): {e.message}"))
                     return
 
             except (httpx.HTTPError, httpx.NetworkError) as e:
@@ -169,11 +146,25 @@ class OpenAIProvider(BaseProvider):
 # ── 消息格式转换 ──────────────────────────────────
 
 
-def _to_openai_messages(msgs: list[Message], suffix: str = "") -> list[dict]:
-    """将内部 Message 列表转为 OpenAI API 格式。"""
-    system_text = _effective_system(suffix)
-    result: list[dict] = [{"role": "system", "content": system_text}]
-    for m in msgs:
+def _to_openai_messages(req: Request) -> list[dict]:
+    """将 Request 转为 OpenAI API 消息格式。
+
+    - 系统消息 = stable + env 拼接为单条（兼容端点对多条 system 支持不一）。
+    - reminder 非空时追加一条尾部 user 消息。
+    """
+    # 构造系统消息：stable 在前（前缀缓存），env 在后
+    system_parts: list[str] = []
+    if req.system.stable:
+        system_parts.append(req.system.stable)
+    if req.system.environment:
+        system_parts.append(req.system.environment)
+    system_text = "\n\n".join(system_parts)
+
+    result: list[dict] = []
+    if system_text:
+        result.append({"role": "system", "content": system_text})
+
+    for m in req.messages:
         if m.role == ROLE_USER:
             result.append({"role": "user", "content": m.content})
         elif m.role == ROLE_ASSISTANT:
@@ -203,4 +194,9 @@ def _to_openai_messages(msgs: list[Message], suffix: str = "") -> list[dict]:
                         "content": r.content,
                     }
                 )
+
+    # reminder 注入：追加尾部 user 消息（OpenAI 容忍连续 user）
+    if req.reminder:
+        result.append({"role": "user", "content": req.reminder})
+
     return result
