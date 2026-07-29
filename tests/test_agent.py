@@ -15,15 +15,23 @@ from forgecode.agent import (
     NOTICE_UNKNOWN_TOOLS,
     Agent,
     Event,
-    Mode,
     Phase,
 )
 from forgecode.conversation.history import (
     Conversation,
     ToolCall,
 )
+from forgecode.permission import Mode
+from forgecode.permission.engine import Engine, new_engine
 from forgecode.providers import BaseProvider, Request, StreamEvent, Usage
 from forgecode.tool import Registry, Result
+
+
+# 提供默认空引擎（使用当前目录，沙箱足够宽松不影响 fake 工具测试）
+def _test_engine() -> Engine:
+    import os
+    e, _ = new_engine(os.getcwd())
+    return e
 
 # ── Fake Provider ─────────────────────────────────
 
@@ -151,12 +159,12 @@ async def test_multi_turn_loop():
         ]
     )
 
-    agent = Agent(provider, registry, "test")
+    agent = Agent(provider, registry, _test_engine(), "test")
     conv = Conversation()
     conv.add_user("test multi-turn")
 
     events: list[Event] = []
-    async for ev in agent.run(conv, Mode.NORMAL):
+    async for ev in agent.run(conv, Mode.BYPASS):
         events.append(ev)
 
     iters = [e for e in events if e.iter > 0]
@@ -194,12 +202,12 @@ async def test_max_iterations():
         )
     provider.set_scripts(scripts)
 
-    agent = Agent(provider, registry, "test")
+    agent = Agent(provider, registry, _test_engine(), "test")
     conv = Conversation()
     conv.add_user("loop forever")
 
     events: list[Event] = []
-    async for ev in agent.run(conv, Mode.NORMAL):
+    async for ev in agent.run(conv, Mode.BYPASS):
         events.append(ev)
 
     notices = [e for e in events if e.notice]
@@ -231,12 +239,12 @@ async def test_unknown_tools_stop():
         )
     provider.set_scripts(scripts)
 
-    agent = Agent(provider, registry, "test")
+    agent = Agent(provider, registry, _test_engine(), "test")
     conv = Conversation()
     conv.add_user("bad tools")
 
     events: list[Event] = []
-    async for ev in agent.run(conv, Mode.NORMAL):
+    async for ev in agent.run(conv, Mode.BYPASS):
         events.append(ev)
 
     notices = [e for e in events if e.notice]
@@ -311,12 +319,12 @@ async def test_unknown_tools_reset():
         ]
     )
 
-    agent = Agent(provider, registry, "test")
+    agent = Agent(provider, registry, _test_engine(), "test")
     conv = Conversation()
     conv.add_user("reset test")
 
     events: list[Event] = []
-    async for ev in agent.run(conv, Mode.NORMAL):
+    async for ev in agent.run(conv, Mode.BYPASS):
         events.append(ev)
 
     # 应停在轮7（重置后：4,5,6 连续3轮未知 → 第7轮触发停止）
@@ -394,12 +402,12 @@ async def test_concurrent_batch():
         ]
     )
 
-    agent = Agent(provider, registry, "test")
+    agent = Agent(provider, registry, _test_engine(), "test")
     conv = Conversation()
     conv.add_user("batch test")
 
     events: list[Event] = []
-    async for ev in agent.run(conv, Mode.NORMAL):
+    async for ev in agent.run(conv, Mode.BYPASS):
         events.append(ev)
 
     assert max_concurrent >= 2  # 两只读并发
@@ -444,14 +452,14 @@ async def test_cancel_history_consistency():
         ]
     )
 
-    agent = Agent(provider, registry, "test")
+    agent = Agent(provider, registry, _test_engine(), "test")
     conv = Conversation()
     conv.add_user("cancel test")
     cancel = asyncio.Event()
 
     # 启动后立刻取消
     events: list[Event] = []
-    gen = agent.run(conv, Mode.NORMAL, cancel)
+    gen = agent.run(conv, Mode.BYPASS, cancel)
 
     # 拿到 iter 事件后取消
     async for ev in gen:
@@ -487,7 +495,7 @@ async def test_plan_mode_tools():
         ]
     )
 
-    agent = Agent(provider, registry, "test")
+    agent = Agent(provider, registry, _test_engine(), "test")
     conv = Conversation()
     conv.add_user("plan test")
 
@@ -525,11 +533,11 @@ async def test_request_system_assembly():
         ]
     )
 
-    agent = Agent(provider, registry, "1.0")
+    agent = Agent(provider, registry, _test_engine(), "1.0")
     conv = Conversation()
     conv.add_user("test")
 
-    async for _ in agent.run(conv, Mode.NORMAL):
+    async for _ in agent.run(conv, Mode.BYPASS):
         pass
 
     assert len(provider.requests) >= 1
@@ -572,7 +580,7 @@ async def test_stable_system_cross_mode():
     agent1 = Agent(provider1, registry, "test")
     conv1 = Conversation()
     conv1.add_user("normal")
-    async for _ in agent1.run(conv1, Mode.NORMAL):
+    async for _ in agent1.run(conv1, Mode.BYPASS):
         pass
 
     agent2 = Agent(provider2, registry, "test")
@@ -612,7 +620,7 @@ async def test_plan_reminder_per_iteration():
         )
     provider.set_scripts(scripts)
 
-    agent = Agent(provider, registry, "test")
+    agent = Agent(provider, registry, _test_engine(), "test")
     conv = Conversation()
     conv.add_user("plan multi-turn")
 
@@ -664,7 +672,7 @@ async def test_reminder_not_in_history():
         ]
     )
 
-    agent = Agent(provider, registry, "test")
+    agent = Agent(provider, registry, _test_engine(), "test")
     conv = Conversation()
     conv.add_user("plan test")
 
@@ -706,12 +714,12 @@ async def test_cache_usage_passthrough():
         ]
     )
 
-    agent = Agent(provider, registry, "test")
+    agent = Agent(provider, registry, _test_engine(), "test")
     conv = Conversation()
     conv.add_user("cache test")
 
     usage_events: list[Usage] = []
-    async for ev in agent.run(conv, Mode.NORMAL):
+    async for ev in agent.run(conv, Mode.BYPASS):
         if ev.usage is not None:
             usage_events.append(ev.usage)
 
@@ -742,11 +750,11 @@ async def test_environment_separate_from_stable():
         ]
     )
 
-    agent = Agent(provider, registry, "2.0")
+    agent = Agent(provider, registry, _test_engine(), "2.0")
     conv = Conversation()
     conv.add_user("env test")
 
-    async for _ in agent.run(conv, Mode.NORMAL):
+    async for _ in agent.run(conv, Mode.BYPASS):
         pass
 
     req = provider.requests[0]

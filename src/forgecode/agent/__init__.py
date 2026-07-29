@@ -1,4 +1,4 @@
-"""Agent ReAct 循环编排：多轮→工具调用→结果回灌→持续直到任务完成。"""
+"""Agent ReAct 循环编排：多轮→权限判定→工具调用→结果回灌。"""
 
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ from forgecode.conversation.history import (
     ToolCall,
     ToolResult,
 )
+from forgecode.permission import Decision, Mode, Outcome
+from forgecode.permission.engine import Engine
 from forgecode.prompt import build_system_prompt, gather_environment, plan_reminder
 from forgecode.providers import BaseProvider, Request, System, Usage
 from forgecode.tool import DEFAULT_TIMEOUT, Registry
@@ -21,20 +23,12 @@ from forgecode.tool import DEFAULT_TIMEOUT, Registry
 
 MAX_ITERATIONS: int = 25
 MAX_UNKNOWN_RUN: int = 3
-PLAN_REMINDER_INTERVAL: int = 4  # 每隔 N 轮重复一次完整规划提醒
+PLAN_REMINDER_INTERVAL: int = 4
 
 NOTICE_MAX_ITER = "（已达最大迭代轮数 25，自动停止；可继续发消息推进。）"
 NOTICE_UNKNOWN_TOOLS = "（连续多轮只请求到未注册的工具，自动停止。）"
 NOTICE_STREAM_ERR = "（请求出错，本轮已中断。）"
 NOTICE_CANCELLED = "（已取消。）"
-
-# ── Mode ──────────────────────────────────────────
-
-
-class Mode(IntEnum):
-    NORMAL = 0
-    PLAN = 1
-
 
 # ── Agent 事件 ────────────────────────────────────
 
@@ -54,11 +48,22 @@ class ToolEvent:
 
 
 @dataclass
+class ApprovalRequest:
+    """人在回路待批准事件。TUI 必须通过 respond Future 回传用户选择。"""
+
+    name: str
+    args: str
+    reason: str
+    respond: asyncio.Future[Outcome]  # noqa: RUF009
+
+
+@dataclass
 class Event:
     text: str = ""
     thinking: str = ""
     tool: ToolEvent | None = None
     usage: Usage | None = None
+    approval: ApprovalRequest | None = None
     iter: int = 0
     notice: str = ""
     done: bool = False
@@ -69,21 +74,27 @@ class Event:
 
 
 class Agent:
-    def __init__(self, provider: BaseProvider, registry: Registry, version: str = "") -> None:
+    def __init__(
+        self,
+        provider: BaseProvider,
+        registry: Registry,
+        engine: Engine,
+        version: str = "",
+    ) -> None:
         self._provider = provider
         self._registry = registry
+        self._engine = engine
         self._version = version
 
     async def run(
         self,
         conv: Conversation,
-        mode: Mode = Mode.NORMAL,
+        mode: Mode = Mode.DEFAULT,
         cancel: asyncio.Event | None = None,
     ) -> AsyncIterator[Event]:
         if cancel is None:
             cancel = asyncio.Event()
 
-        # ── 采集环境 + 装配稳定系统提示 ──
         env = gather_environment(self._version, self._provider.config.model)
         env_text = env.render()
         sys = build_system_prompt()
@@ -102,13 +113,11 @@ class Agent:
                 await _finish_cancelled(conv)
                 return
 
-            # ── 按轮次计算 reminder ──
             reminder = ""
             if mode == Mode.PLAN:
                 full = it == 1 or (it - 1) % PLAN_REMINDER_INTERVAL == 0
                 reminder = plan_reminder(full)
 
-            # ── 流式请求 ──
             result: dict[str, Any] = {}
             async for ev in _stream_once(
                 self._provider, conv, sys, env_text, defs, reminder, cancel, result
@@ -130,13 +139,11 @@ class Agent:
             if usage is not None:
                 yield Event(usage=usage)
 
-            # ── 无工具 → 自然完成 ──
             if not calls:
                 conv.add_assistant(text or "（任务完成）")
                 yield Event(done=True)
                 return
 
-            # ── 有工具 → 执行 ──
             conv.add_assistant_with_tool_calls(text, calls)
 
             if _all_unknown(self._registry, calls):
@@ -145,7 +152,9 @@ class Agent:
                 unknown_run = 0
 
             batched_result: dict[str, Any] = {}
-            async for ev in _execute_batched(self._registry, calls, cancel, batched_result):
+            async for ev in _execute_batched(
+                self._registry, self._engine, calls, mode, cancel, batched_result
+            ):
                 yield ev
 
             results: list[ToolResult] = batched_result.get("results", [])
@@ -162,13 +171,12 @@ class Agent:
                 yield Event(done=True)
                 return
 
-        # 迭代上限
         yield Event(notice=NOTICE_MAX_ITER)
         await _ensure_assistant_tail(conv, NOTICE_MAX_ITER)
         yield Event(done=True)
 
 
-# ── stream_once（async generator） ────────────────
+# ── stream_once ───────────────────────────────────
 
 
 async def _stream_once(
@@ -181,7 +189,6 @@ async def _stream_once(
     cancel: asyncio.Event,
     result: dict[str, Any],
 ) -> AsyncIterator[Event]:
-    """单轮流式请求。事件实时 yield，结果通过 result dict 传回。"""
     text = ""
     calls: list[ToolCall] = []
     usage: Usage | None = None
@@ -198,25 +205,19 @@ async def _stream_once(
             if cancel.is_set():
                 result["ok"] = False
                 return
-
             if se.err is not None:
                 yield Event(err=se.err)
                 result["ok"] = False
                 return
-
             if se.text:
                 text += se.text
                 yield Event(text=se.text)
-
             if se.thinking:
                 yield Event(thinking=se.thinking)
-
             if se.tool_calls:
                 calls = se.tool_calls
-
             if se.usage:
                 usage = se.usage
-
             if se.done:
                 break
     except Exception as e:
@@ -230,16 +231,18 @@ async def _stream_once(
     result["ok"] = True
 
 
-# ── execute_batched（async generator） ────────────
+# ── execute_batched（含权限判定）───────────────────
 
 
 async def _execute_batched(
     registry: Registry,
+    engine: Engine,
     calls: list[ToolCall],
+    mode: Mode,
     cancel: asyncio.Event,
     result: dict[str, Any],
 ) -> AsyncIterator[Event]:
-    """保序分批并发执行。事件实时 yield，结果通过 result dict 传回。"""
+    """保序分批并发执行，每工具前走权限判定。"""
     results: list[ToolResult | None] = [None] * len(calls)
     i = 0
 
@@ -250,10 +253,20 @@ async def _execute_batched(
             result["completed"] = False
             return
 
-        if registry.is_read_only(calls[i].name):
+        read_only = registry.is_read_only(calls[i].name)
+
+        if read_only:
+            # 只读批：逐个 check（只读永不 Ask），Deny 项跳过执行
             j = i
             while j < len(calls) and registry.is_read_only(calls[j].name):
                 j += 1
+
+            # 先 check 所有
+            denials: dict[int, tuple[Decision, str]] = {}
+            for k in range(i, j):
+                d, reason = engine.check(mode, calls[k], True)
+                if d == Decision.DENY:
+                    denials[k] = (d, reason)
 
             for k in range(i, j):
                 yield Event(
@@ -265,14 +278,14 @@ async def _execute_batched(
                 )
 
             async def _run_one(k: int) -> None:
-                call = calls[k]
-                exec_result = await registry.execute(call.name, call.input, timeout=DEFAULT_TIMEOUT)
-                tr = ToolResult(
-                    tool_call_id=call.id,
-                    content=exec_result.content,
-                    is_error=exec_result.is_error,
+                if k in denials:
+                    _, reason = denials[k]
+                    results[k] = ToolResult(tool_call_id=calls[k].id, content=reason, is_error=True)
+                    return
+                exec_result = await registry.execute(calls[k].name, calls[k].input, timeout=DEFAULT_TIMEOUT)
+                results[k] = ToolResult(
+                    tool_call_id=calls[k].id, content=exec_result.content, is_error=exec_result.is_error
                 )
-                results[k] = tr
 
             await asyncio.gather(*[_run_one(k) for k in range(i, j)])
 
@@ -281,36 +294,57 @@ async def _execute_batched(
                 assert r is not None
                 yield Event(
                     tool=ToolEvent(
-                        name=calls[k].name,
-                        phase=Phase.END,
-                        result=_summary(r.content),
-                        is_error=r.is_error,
+                        name=calls[k].name, phase=Phase.END, result=_summary(r.content), is_error=r.is_error
                     )
                 )
 
             i = j
         else:
+            # 有副作用 → 串行，走 check
             call = calls[i]
+            d, reason = engine.check(mode, call, False)
+
             yield Event(
-                tool=ToolEvent(
-                    name=call.name,
-                    args=_args_preview(call.input),
-                    phase=Phase.START,
+                tool=ToolEvent(name=call.name, args=_args_preview(call.input), phase=Phase.START)
+            )
+
+            if d == Decision.ALLOW:
+                exec_result = await registry.execute(call.name, call.input, timeout=DEFAULT_TIMEOUT)
+                results[i] = ToolResult(
+                    tool_call_id=call.id, content=exec_result.content, is_error=exec_result.is_error
                 )
-            )
-            exec_result = await registry.execute(call.name, call.input, timeout=DEFAULT_TIMEOUT)
-            tr = ToolResult(
-                tool_call_id=call.id,
-                content=exec_result.content,
-                is_error=exec_result.is_error,
-            )
-            results[i] = tr
+            elif d == Decision.DENY:
+                results[i] = ToolResult(tool_call_id=call.id, content=reason, is_error=True)
+            else:  # ASK → 人在回路
+                respond: asyncio.Future[Outcome] = asyncio.get_running_loop().create_future()
+                yield Event(
+                    approval=ApprovalRequest(
+                        name=call.name,
+                        args=_args_preview(call.input),
+                        reason=reason,
+                        respond=respond,
+                    )
+                )
+                outcome = await respond
+                if outcome == Outcome.DENY_ONCE:
+                    results[i] = ToolResult(tool_call_id=call.id, content=reason, is_error=True)
+                else:
+                    if outcome == Outcome.ALLOW_FOREVER:
+                        try:
+                            from forgecode.permission.persist import persist_local_allow
+                            persist_local_allow(engine, call)
+                        except Exception:
+                            pass
+                    exec_result = await registry.execute(call.name, call.input, timeout=DEFAULT_TIMEOUT)
+                    results[i] = ToolResult(
+                        tool_call_id=call.id, content=exec_result.content, is_error=exec_result.is_error
+                    )
+
+            r = results[i]
+            assert r is not None
             yield Event(
                 tool=ToolEvent(
-                    name=call.name,
-                    phase=Phase.END,
-                    result=_summary(exec_result.content),
-                    is_error=exec_result.is_error,
+                    name=call.name, phase=Phase.END, result=_summary(r.content), is_error=r.is_error
                 )
             )
             i += 1
@@ -319,7 +353,7 @@ async def _execute_batched(
     result["completed"] = True
 
 
-# ── 辅助函数 ──────────────────────────────────────
+# ── 辅助 ──────────────────────────────────────────
 
 
 def _args_preview(inp: str) -> str:

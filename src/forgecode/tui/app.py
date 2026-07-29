@@ -16,9 +16,11 @@ from rich.panel import Panel
 from rich.rule import Rule
 from rich.text import Text
 
-from forgecode.agent import Agent, Mode, Phase, ToolEvent
+from forgecode.agent import Agent, ApprovalRequest, Phase, ToolEvent
 from forgecode.config.schema import AppConfig
 from forgecode.conversation.history import Conversation
+from forgecode.permission import Mode, Outcome
+from forgecode.permission.engine import Engine
 from forgecode.prompt import EXECUTE_DIRECTIVE
 from forgecode.providers import BaseProvider, create_provider
 from forgecode.tool import Registry
@@ -54,16 +56,18 @@ class ForgeApp:
         provider: BaseProvider,
         conversation: Conversation,
         registry: Registry,
+        engine: Engine,
     ) -> None:
         self.config = config
         self.provider = provider
         self.conversation = conversation
         self.registry = registry
+        self.engine = engine
         self.console = Console()
         self._show_thinking: bool = False
         self._exit_flag: bool = False
         # Agent Loop 状态
-        self.mode: Mode = Mode.NORMAL
+        self.mode: Mode = engine.start_mode()
         self._turn_cancel: asyncio.Event | None = None
         self._iter: int = 0
         # token 用量累计
@@ -145,6 +149,7 @@ class ForgeApp:
                         "/providers   列出已配置的供应商\n"
                         "/switch <n>  切换到指定供应商\n"
                         "/thinking on|off  切换思考展示\n"
+                        "/mode        循环切换权限模式\n"
                         "/plan        进入计划模式（仅只读工具）\n"
                         "/do          批准计划并开始执行",
                     ),
@@ -198,11 +203,15 @@ class ForgeApp:
                 "[dim]已进入计划模式（仅只读工具），输入需求后产出计划。用 /do 批准执行。[/dim]"
             )
 
+        elif cmd == "/mode":
+            # 循环切换权限模式
+            self.mode = Mode((int(self.mode) + 1) % 4)
+            self.console.print(f"[dim]已切换到 {self.mode.label()} 模式[/dim]")
+
         elif cmd == "/do":
-            self.mode = Mode.NORMAL
+            self.mode = Mode.DEFAULT
             self.conversation.add_user(EXECUTE_DIRECTIVE)
             self.console.print("[dim]已切回执行模式，正在按计划执行...[/dim]")
-            # 触发 Agent 执行
             asyncio.create_task(self._submit(EXECUTE_DIRECTIVE))
 
         else:
@@ -229,7 +238,7 @@ class ForgeApp:
         timer_task = asyncio.create_task(self._show_imagining())
 
         # 创建 Agent 并消费事件流
-        agent = Agent(self.provider, self.registry, VERSION)
+        agent = Agent(self.provider, self.registry, self.engine, VERSION)
         cur_text = ""
         in_thinking = False
         thinking_shown_header = False
@@ -265,6 +274,10 @@ class ForgeApp:
                 elif ev.usage is not None:
                     self._total_input_tokens += ev.usage.input_tokens
                     self._total_output_tokens += ev.usage.output_tokens
+
+                elif ev.approval is not None:
+                    # 人在回路：展示待批准块，等待用户选择
+                    await self._handle_approval(ev.approval, timer_task)
 
                 elif ev.tool is not None:
                     self._on_first_content(timer_task, first_content)
@@ -341,6 +354,52 @@ class ForgeApp:
             sys.stdout.write("\n")
             sys.stdout.flush()
 
+    # ── 人在回路 ──────────────────────────────────
+
+    async def _handle_approval(
+        self, req: ApprovalRequest, timer_task: asyncio.Task
+    ) -> None:
+        """展示待批准块，等待用户三选一。"""
+        timer_task.cancel()
+        self.console.print("\n")
+        self.console.print(
+            Panel(
+                Text(
+                    f"● {req.name}({req.args})\n"
+                    f"  原因：{req.reason}\n\n"
+                    f"  1. 允许本次\n"
+                    f"  2. 永久允许（写入本地配置）\n"
+                    f"  3. 拒绝本次\n"
+                ),
+                title="权限确认",
+                border_style="yellow",
+            )
+        )
+
+        # 等待用户选择
+        while True:
+            try:
+                choice = await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: input("  选择 [1/2/3]（默认 1）：").strip()
+                )
+            except (EOFError, KeyboardInterrupt):
+                req.respond.set_result(Outcome.DENY_ONCE)
+                self.console.print("[dim]已取消[/dim]")
+                return
+
+            if choice == "1" or choice == "":
+                req.respond.set_result(Outcome.ALLOW_ONCE)
+                self.console.print("[dim]允许本次[/dim]")
+                return
+            elif choice == "2":
+                req.respond.set_result(Outcome.ALLOW_FOREVER)
+                self.console.print("[dim]永久允许（已写入本地配置）[/dim]")
+                return
+            elif choice == "3":
+                req.respond.set_result(Outcome.DENY_ONCE)
+                self.console.print("[dim]拒绝本次[/dim]")
+                return
+
     # ── 工具行渲染 ────────────────────────────────
 
     def _render_tool_start(self, tool: ToolEvent) -> None:
@@ -379,11 +438,10 @@ class ForgeApp:
         self.console.print("[dim]就绪 - 输入消息开始对话，/help 查看命令[/dim]")
 
     def _status_bar(self) -> list[tuple[str, str]]:
-        provider_name = self.config.active_provider_name
         model_name = self._active_model()
 
-        # 模式标记
-        mode_str = " PLAN" if self.mode == Mode.PLAN else ""
+        # 权限模式标签
+        mode_label = self.mode.label()
 
         # token 用量
         it = self._total_input_tokens
@@ -398,7 +456,7 @@ class ForgeApp:
         else:
             elapsed = "..."
 
-        bar = f" {provider_name}{mode_str} │ {model_name} │ {tok_str} │ {elapsed} "
+        bar = f" {mode_label} │ {model_name} │ {tok_str} │ {elapsed} "
         return [("class:bottom-toolbar.text", bar)]
 
     def _active_model(self) -> str:
