@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -62,38 +64,56 @@ class Conversation:
 
     def __init__(self) -> None:
         self._messages: list[Message] = []
+        self._lock = threading.RLock()
 
     def add_user(self, text: str) -> None:
         """追加用户消息。"""
-        self._messages.append(Message(role=ROLE_USER, content=text))
+        with self._lock:
+            self._messages.append(Message(role=ROLE_USER, content=text))
 
     def add_assistant(self, text: str) -> None:
         """追加 assistant 纯文本回合。"""
-        self._messages.append(Message(role=ROLE_ASSISTANT, content=text))
+        with self._lock:
+            self._messages.append(Message(role=ROLE_ASSISTANT, content=text))
 
     def add_assistant_with_tool_calls(self, text: str, calls: list[ToolCall]) -> None:
         """追加 assistant 工具调用回合。"""
-        self._messages.append(
-            Message(
-                role=ROLE_ASSISTANT,
-                content=text,
-                tool_calls=list(calls),
+        with self._lock:
+            self._messages.append(
+                Message(
+                    role=ROLE_ASSISTANT,
+                    content=text,
+                    tool_calls=list(calls),
+                )
             )
-        )
 
     def add_tool_results(self, results: list[ToolResult]) -> None:
         """追加工具结果回合。"""
-        self._messages.append(Message(role=ROLE_TOOL, tool_results=list(results)))
+        with self._lock:
+            self._messages.append(Message(role=ROLE_TOOL, tool_results=list(results)))
 
     def clear(self) -> None:
         """清空所有消息。"""
-        self._messages.clear()
+        with self._lock:
+            self._messages.clear()
 
     def last_role(self) -> str:
         """返回最后一条消息的 role；空历史返回 ""。"""
-        return self._messages[-1].role if self._messages else ""
+        with self._lock:
+            return self._messages[-1].role if self._messages else ""
 
     @property
     def messages(self) -> list[Message]:
         """返回当前所有消息的副本。"""
-        return list(self._messages)
+        with self._lock:
+            return list(self._messages)
+
+    def length(self) -> int:
+        """返回当前消息条数。"""
+        with self._lock:
+            return len(self._messages)
+
+    def replace_history(self, msgs: list[Message]) -> None:
+        """把内存列表整体替换为传入的 msgs（深拷贝，不暴露引用）。"""
+        with self._lock:
+            self._messages = copy.deepcopy(msgs)

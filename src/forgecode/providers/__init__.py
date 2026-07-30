@@ -9,6 +9,17 @@ from dataclasses import dataclass, field
 from forgecode.config.schema import ProviderConfig
 from forgecode.conversation.history import Message, ToolDefinition
 
+# ── 哨兵异常 ──────────────────────────────────────
+
+
+class PromptTooLongError(Exception):
+    """Provider 上报上下文超出窗口时统一抛出的哨兵异常。
+
+    不同 provider 的原始异常结构差异大，统一成此类型后 agent 主循环只需一处判断。
+    原始异常通过 __cause__ 保留供调试。
+    """
+
+
 # ── 流式事件 ──────────────────────────────────────
 
 

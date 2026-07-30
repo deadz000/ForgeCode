@@ -6,8 +6,13 @@ import argparse
 import asyncio
 import os
 import sys
+from pathlib import Path
 
+from forgecode.agent.runtime import SessionRuntime
+from forgecode.compact.state import CompactCircuitBreaker, ContentReplacementState, RecoveryState
+from forgecode.compact.state import new_session_context as _new_session_context
 from forgecode.config.loader import load_config
+from forgecode.config.schema import effective_context_window
 from forgecode.conversation.history import Conversation
 from forgecode.mcp import load_config as load_mcp_config
 from forgecode.mcp import new_manager as new_mcp_manager
@@ -61,14 +66,24 @@ def cli() -> None:
     conversation = Conversation()
     registry = new_default_registry()
 
+    # ── 构造 SessionRuntime ──
+    workspace = str(Path.cwd())
+    runtime = SessionRuntime(
+        replacement=ContentReplacementState(),
+        recovery=RecoveryState(),
+        auto_tracking=CompactCircuitBreaker(),
+        session=_new_session_context(workspace),
+        context_window=effective_context_window(active_config),
+    )
+
     # 启动异步主流程（含 MCP 连接 + TUI）
     try:
-        asyncio.run(_amain(app_config, provider, conversation, registry))
+        asyncio.run(_amain(app_config, provider, conversation, registry, runtime))
     except KeyboardInterrupt:
         pass
 
 
-async def _amain(app_config, provider, conversation, registry) -> None:
+async def _amain(app_config, provider, conversation, registry, runtime) -> None:
     """异步主流程：MCP 连接 → 注册工具 → 启动 TUI → 关闭 MCP。"""
     root = os.getcwd()
 
@@ -87,6 +102,7 @@ async def _amain(app_config, provider, conversation, registry) -> None:
             conversation=conversation,
             registry=registry,
             engine=engine,
+            runtime=runtime,
         )
         await app.run_async()
     finally:

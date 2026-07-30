@@ -16,7 +16,7 @@ from forgecode.conversation.history import (
     Message,
     ToolCall,
 )
-from forgecode.providers import BaseProvider, Request, StreamEvent, Usage
+from forgecode.providers import BaseProvider, PromptTooLongError, Request, StreamEvent, Usage
 
 
 class AnthropicProvider(BaseProvider):
@@ -134,6 +134,13 @@ class AnthropicProvider(BaseProvider):
 
             except APIStatusError as e:
                 if e.status_code < 500:
+                    # 检查是否为 PTL 错误
+                    msg = str(e.message).lower() if hasattr(e, "message") else str(e).lower()
+                    if "prompt is too long" in msg or "context_length" in msg:
+                        wrapped = PromptTooLongError("anthropic prompt too long")
+                        wrapped.__cause__ = e
+                        yield StreamEvent(err=wrapped)
+                        return
                     yield StreamEvent(err=Exception(f"API 错误 ({e.status_code}): {e.message}"))
                     return
                 if attempt == 1:

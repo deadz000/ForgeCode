@@ -6,6 +6,7 @@ import asyncio
 import os
 import sys
 import time
+from typing import Any
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
@@ -16,7 +17,7 @@ from rich.panel import Panel
 from rich.rule import Rule
 from rich.text import Text
 
-from forgecode.agent import Agent, ApprovalRequest, Phase, ToolEvent
+from forgecode.agent import Agent, ApprovalRequest, CompactEvent, CompactPhase, Phase, ToolEvent
 from forgecode.config.schema import AppConfig
 from forgecode.conversation.history import Conversation
 from forgecode.permission import Mode, Outcome
@@ -57,12 +58,14 @@ class ForgeApp:
         conversation: Conversation,
         registry: Registry,
         engine: Engine,
+        runtime: Any = None,  # SessionRuntime
     ) -> None:
         self.config = config
         self.provider = provider
         self.conversation = conversation
         self.registry = registry
         self.engine = engine
+        self.runtime = runtime
         self.console = Console()
         self._show_thinking: bool = False
         self._exit_flag: bool = False
@@ -76,6 +79,20 @@ class ForgeApp:
         # 当前轮次计时
         self._response_start: float = 0
         self._response_elapsed: float = 0
+        # 持久 Agent 实例
+        self._agent: Agent | None = None
+
+    def _get_agent(self) -> Agent:
+        """延迟构造 Agent（需要 provider 已选定）。"""
+        if self._agent is None:
+            self._agent = Agent(
+                self.provider,
+                self.registry,
+                self.engine,
+                VERSION,
+                runtime=self.runtime,
+            )
+        return self._agent
 
     # ── 启动 ───────────────────────────────────────
 
@@ -119,7 +136,7 @@ class ForgeApp:
                 continue
 
             if user_input.startswith("/"):
-                self._handle_command(user_input)
+                await self._dispatch_command(user_input)
             else:
                 try:
                     await self._submit(user_input)
@@ -127,9 +144,10 @@ class ForgeApp:
                     self.console.print()
                     self.console.print("[dim]已中断[/dim]")
 
-    # ── 命令处理 ──────────────────────────────────
+    # ── 命令分发 ──────────────────────────────────
 
-    def _handle_command(self, text: str) -> None:
+    async def _dispatch_command(self, text: str) -> None:
+        """统一命令分发（不写入 conversation，不发给 LLM）。"""
         parts = text.split(maxsplit=1)
         cmd = parts[0].lower()
         args = parts[1] if len(parts) > 1 else ""
@@ -151,7 +169,8 @@ class ForgeApp:
                         "/thinking on|off  切换思考展示\n"
                         "/mode        循环切换权限模式\n"
                         "/plan        进入计划模式（仅只读工具）\n"
-                        "/do          批准计划并开始执行",
+                        "/do          批准计划并开始执行\n"
+                        "/compact     手动压缩上下文",
                     ),
                     title="可用命令",
                     border_style="dim",
@@ -184,6 +203,12 @@ class ForgeApp:
             new_config = matching[0]
             self.provider = create_provider(new_config)
             self.config.active_provider_name = new_config.name
+            # 切换 provider 后重建 Agent
+            self._agent = None
+            if self.runtime is not None:
+                from forgecode.config.schema import effective_context_window
+
+                self.runtime.context_window = effective_context_window(new_config)
             self.console.print(f"[green]已切换到 {new_config.name} ({new_config.model})[/green]")
 
         elif cmd == "/thinking":
@@ -214,8 +239,24 @@ class ForgeApp:
             self.console.print("[dim]已切回执行模式，正在按计划执行...[/dim]")
             asyncio.create_task(self._submit(EXECUTE_DIRECTIVE))
 
+        elif cmd == "/compact":
+            await self._handle_compact()
+
         else:
             self.console.print(f"[yellow]未知命令: {cmd}，输入 /help 查看可用命令[/yellow]")
+
+    async def _handle_compact(self) -> None:
+        """手动 /compact：跳过阈值、无条件触发一次 LLM 摘要。"""
+        agent = self._get_agent()
+        defs = (
+            self.registry.read_only_definitions() if self.mode == Mode.PLAN else self.registry.definitions()
+        )
+        self.console.print("[dim]正在压缩上下文...[/dim]")
+        try:
+            before, after = await agent.run_force_compact(self.conversation, defs)
+            self.console.print(f"[dim]已压缩，token 从 {before} 降至 {after}[/dim]")
+        except Exception as e:
+            self.console.print(f"[red]压缩失败: {e}[/red]")
 
     # ── 提交消息 ──────────────────────────────────
 
@@ -237,8 +278,8 @@ class ForgeApp:
         # 启动实时计时器
         timer_task = asyncio.create_task(self._show_imagining())
 
-        # 创建 Agent 并消费事件流
-        agent = Agent(self.provider, self.registry, self.engine, VERSION)
+        # 获取持久 Agent 实例
+        agent = self._get_agent()
         cur_text = ""
         in_thinking = False
         thinking_shown_header = False
@@ -246,6 +287,17 @@ class ForgeApp:
 
         try:
             async for ev in agent.run(self.conversation, self.mode, self._turn_cancel):
+                # ── 压缩生命周期事件（优先处理）──
+                if ev.compact is not None:
+                    self._on_first_content(timer_task, first_content)
+                    first_content = True
+                    in_thinking = False
+                    notice = _format_compact_notice(ev.compact)
+                    if notice:
+                        self.console.print()
+                        self.console.print(f"[dim]{notice}[/dim]")
+                    continue
+
                 if ev.thinking:
                     self._on_first_content(timer_task, first_content)
                     first_content = True
@@ -454,10 +506,7 @@ class ForgeApp:
                     servers.add(parts[1])
         if not servers:
             return ""
-        return (
-            f"Connected to {len(servers)} MCP server(s), "
-            f"{tool_count} tool(s) registered"
-        )
+        return f"Connected to {len(servers)} MCP server(s), {tool_count} tool(s) registered"
 
     def _status_bar(self) -> list[tuple[str, str]]:
         model_name = self._active_model()
@@ -486,6 +535,22 @@ class ForgeApp:
             if p.name == self.config.active_provider_name:
                 return p.model
         return "?"
+
+
+# ── 压缩事件格式化 ─────────────────────────────────
+
+
+def _format_compact_notice(ev: CompactEvent) -> str:
+    """按 phase 返回统一的压缩提示文案。"""
+    if ev.phase == CompactPhase.BEFORE_AUTO:
+        return "正在压缩上下文..."
+    elif ev.phase == CompactPhase.BEFORE_EMERGENCY:
+        return "上下文撞墙，自动压缩中..."
+    elif ev.phase in (CompactPhase.AFTER_AUTO, CompactPhase.AFTER_EMERGENCY):
+        if ev.err is not None:
+            return f"压缩失败：{ev.err}"
+        return f"已压缩，token 从 {ev.before} 降至 {ev.after}"
+    return ""
 
 
 # ── 辅助 ──────────────────────────────────────────

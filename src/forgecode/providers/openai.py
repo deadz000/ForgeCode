@@ -14,7 +14,7 @@ from forgecode.conversation.history import (
     ROLE_USER,
     ToolCall,
 )
-from forgecode.providers import BaseProvider, Request, StreamEvent, Usage
+from forgecode.providers import BaseProvider, PromptTooLongError, Request, StreamEvent, Usage
 
 
 class OpenAIProvider(BaseProvider):
@@ -127,6 +127,13 @@ class OpenAIProvider(BaseProvider):
 
             except APIStatusError as e:
                 if e.status_code < 500:
+                    # 检查是否为 context_length_exceeded
+                    code = getattr(e, "code", None)
+                    if code == "context_length_exceeded":
+                        wrapped = PromptTooLongError("openai context length exceeded")
+                        wrapped.__cause__ = e
+                        yield StreamEvent(err=wrapped)
+                        return
                     yield StreamEvent(err=Exception(f"API 错误 ({e.status_code}): {e.message}"))
                     return
                 if attempt == 1:

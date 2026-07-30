@@ -52,6 +52,7 @@ def _parse_providers(data: dict[str, object]) -> list[ProviderConfig]:
                 base_url=str(entry["base_url"]),
                 api_key=str(entry["api_key"]),
                 thinking=bool(entry.get("thinking", False)),
+                context_window=int(entry.get("context_window", 0)),
             )
         )
     return result

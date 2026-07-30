@@ -1,22 +1,39 @@
-"""Agent ReAct 循环编排：多轮→权限判定→工具调用→结果回灌。"""
+"""Agent ReAct 循环编排：多轮→权限判定→工具调用→结果回灌 + 上下文管理集成。"""
 
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from enum import IntEnum
+from enum import Enum, IntEnum
+from pathlib import Path
 from typing import Any
 
+from forgecode.compact import (
+    ManageInput,
+    ManageOutput,
+    TriggerKind,
+    manage_context,
+)
+from forgecode.compact.token import estimate_tokens
+from forgecode.compact.token import usage_anchor as _usage_anchor_fn
 from forgecode.conversation.history import (
     Conversation,
     ToolCall,
+    ToolDefinition,
     ToolResult,
 )
 from forgecode.permission import Decision, Mode, Outcome
 from forgecode.permission.engine import Engine
 from forgecode.prompt import build_system_prompt, gather_environment, plan_reminder
-from forgecode.providers import BaseProvider, Request, System, Usage
+from forgecode.providers import (
+    BaseProvider,
+    PromptTooLongError,
+    Request,
+    System,
+    Usage,
+)
 from forgecode.tool import DEFAULT_TIMEOUT, Registry
 
 # ── 常量 ──────────────────────────────────────────
@@ -30,12 +47,31 @@ NOTICE_UNKNOWN_TOOLS = "（连续多轮只请求到未注册的工具，自动�
 NOTICE_STREAM_ERR = "（请求出错，本轮已中断。）"
 NOTICE_CANCELLED = "（已取消。）"
 
+MANUAL_SAFETY_MARGIN: int = 3000
+AUTO_SAFETY_MARGIN: int = 13000
+SUMMARY_RESERVE: int = 20000
+
 # ── Agent 事件 ────────────────────────────────────
 
 
 class Phase(IntEnum):
     START = 0
     END = 1
+
+
+class CompactPhase(Enum):
+    BEFORE_AUTO = "before_auto"
+    AFTER_AUTO = "after_auto"
+    BEFORE_EMERGENCY = "before_emergency"
+    AFTER_EMERGENCY = "after_emergency"
+
+
+@dataclass
+class CompactEvent:
+    phase: CompactPhase
+    before: int = 0
+    after: int = 0
+    err: Exception | None = None
 
 
 @dataclass
@@ -64,6 +100,7 @@ class Event:
     tool: ToolEvent | None = None
     usage: Usage | None = None
     approval: ApprovalRequest | None = None
+    compact: CompactEvent | None = None
     iter: int = 0
     notice: str = ""
     done: bool = False
@@ -80,11 +117,20 @@ class Agent:
         registry: Registry,
         engine: Engine,
         version: str = "",
+        *,
+        runtime: Any = None,  # SessionRuntime | None
     ) -> None:
         self._provider = provider
         self._registry = registry
         self._engine = engine
         self._version = version
+
+        if runtime is None:
+            from forgecode.agent.runtime import new_runtime
+
+            runtime = new_runtime(".")
+        self.runtime = runtime
+        self._run_lock = asyncio.Lock()
 
     async def run(
         self,
@@ -92,14 +138,23 @@ class Agent:
         mode: Mode = Mode.DEFAULT,
         cancel: asyncio.Event | None = None,
     ) -> AsyncIterator[Event]:
+        """Agent 主循环：ReAct 多轮 + 上下文管理。"""
         if cancel is None:
             cancel = asyncio.Event()
 
+        async with self._run_lock:
+            async for ev in self._run_impl(conv, mode, cancel):
+                yield ev
+
+    async def _run_impl(
+        self,
+        conv: Conversation,
+        mode: Mode,
+        cancel: asyncio.Event,
+    ) -> AsyncIterator[Event]:
         env = gather_environment(self._version, self._provider.config.model)
         env_text = env.render()
         sys = build_system_prompt()
-
-        defs = self._registry.read_only_definitions() if mode == Mode.PLAN else self._registry.definitions()
         unknown_run = 0
 
         for it in range(1, MAX_ITERATIONS + 1):
@@ -109,28 +164,122 @@ class Agent:
                 await _finish_cancelled(conv)
                 return
 
+            # 本轮按 mode 选工具定义（同一份引用给 manage_context 和 stream）
+            if mode == Mode.PLAN:
+                defs = self._registry.read_only_definitions()
+            else:
+                defs = self._registry.definitions()
+
+            # ── 上下文管理（每轮 stream 之前）──
+            anchor = self.runtime.usage_anchor
+            anchor_len = self.runtime.anchor_msg_len
+            cw = self.runtime.context_window
+            est = estimate_tokens(anchor, conv.messages, anchor_len)
+
+            in_ = ManageInput(
+                conv=conv,
+                provider=self._provider,
+                model=self._provider.config.model,
+                context_window=cw,
+                tool_defs=defs,
+                replacement=self.runtime.replacement,
+                recovery=self.runtime.recovery,
+                auto_tracking=self.runtime.auto_tracking,
+                session=self.runtime.session,
+                usage_anchor=anchor,
+                anchor_msg_len=anchor_len,
+                estimated_token=est,
+                trigger=TriggerKind.AUTO,
+            )
+
+            # 判断是否会触发自动摘要（用于 emit before 事件）
+            threshold = cw - SUMMARY_RESERVE - AUTO_SAFETY_MARGIN
+            will_summarize = (
+                est >= threshold
+                and cw > SUMMARY_RESERVE + AUTO_SAFETY_MARGIN
+                and not self.runtime.auto_tracking.tripped()
+            )
+
+            if will_summarize:
+                yield Event(compact=CompactEvent(phase=CompactPhase.BEFORE_AUTO))
+
+            mc_err: Exception | None = None
+            try:
+                out = await manage_context(in_)
+            except Exception as e:
+                mc_err = e
+                out = ManageOutput(before_tokens=est, after_tokens=0)
+
+            if will_summarize:
+                yield Event(
+                    compact=CompactEvent(
+                        phase=CompactPhase.AFTER_AUTO,
+                        before=out.before_tokens,
+                        after=out.after_tokens,
+                        err=mc_err,
+                    )
+                )
+
+            if mc_err is not None:
+                yield Event(err=mc_err)
+                return
+
+            # layer1 落盘提示
+            if out.offloaded > 0:
+                spill = self.runtime.session.spill_dir
+                yield Event(notice=f"已落盘 {out.offloaded} 个大工具结果到 {spill}")
+
+            # ── Plan Mode reminder ──
             reminder = ""
             if mode == Mode.PLAN:
                 full = it == 1 or (it - 1) % PLAN_REMINDER_INTERVAL == 0
                 reminder = plan_reminder(full)
 
-            result: dict[str, Any] = {}
-            async for ev in _stream_once(self._provider, conv, sys, env_text, defs, reminder, cancel, result):
+            # ── stream_once ──
+            stream_result: dict[str, Any] = {}
+            async for ev in _stream_once(
+                self._provider, conv, sys, env_text, defs, reminder, cancel, stream_result
+            ):
                 yield ev
 
-            ok: bool = result.get("ok", False)
-            if not ok:
+            text: str = stream_result.get("text", "")
+            calls: list[ToolCall] = stream_result.get("calls", [])
+            usage: Usage | None = stream_result.get("usage")
+            err: Exception | None = stream_result.get("err")
+
+            if err is not None:
+                # ── 紧急压缩处理 ──
+                if isinstance(err, PromptTooLongError):
+                    async for ev in self._emergency_compact(conv, est, err):
+                        yield ev
+                    # 重新估算
+                    est2 = estimate_tokens(0, conv.messages, 0)
+                    if est2 >= cw - MANUAL_SAFETY_MARGIN:
+                        yield Event(err=Exception("紧急压缩后 token 仍超限，无法恢复"))
+                        return
+                    # 重试一次
+                    retry_result: dict[str, Any] = {}
+                    async for ev in _stream_once(
+                        self._provider, conv, sys, env_text, defs, reminder, cancel, retry_result
+                    ):
+                        yield ev
+                    text = retry_result.get("text", "")
+                    calls = retry_result.get("calls", [])
+                    usage = retry_result.get("usage")
+                    err = retry_result.get("err")
+
+            if err is not None:
                 if cancel.is_set():
                     await _finish_cancelled(conv)
                     return
+                yield Event(err=err)
                 await _ensure_assistant_tail(conv, NOTICE_STREAM_ERR)
                 return
 
-            text: str = result.get("text", "")
-            calls: list[ToolCall] = result.get("calls", [])
-            usage: Usage | None = result.get("usage")
-
+            # 更新 usage 锚点（仅主对话路径）
             if usage is not None:
+                self.runtime.usage_anchor = _usage_anchor_fn(usage)
+                self.runtime.anchor_msg_len = conv.length()
                 yield Event(usage=usage)
 
             if not calls:
@@ -140,14 +289,16 @@ class Agent:
 
             conv.add_assistant_with_tool_calls(text, calls)
 
+            # 未知工具计数
             if _all_unknown(self._registry, calls):
                 unknown_run += 1
             else:
                 unknown_run = 0
 
+            # 工具执行
             batched_result: dict[str, Any] = {}
             async for ev in _execute_batched(
-                self._registry, self._engine, calls, mode, cancel, batched_result
+                self._registry, self._engine, calls, mode, cancel, self.runtime, batched_result
             ):
                 yield ev
 
@@ -169,6 +320,73 @@ class Agent:
         await _ensure_assistant_tail(conv, NOTICE_MAX_ITER)
         yield Event(done=True)
 
+    async def _emergency_compact(self, conv: Conversation, est: int, err: Exception) -> AsyncIterator[Event]:
+        """紧急压缩：先 layer1 再 force_compact。"""
+        yield Event(compact=CompactEvent(phase=CompactPhase.BEFORE_EMERGENCY))
+
+        in_ = ManageInput(
+            conv=conv,
+            provider=self._provider,
+            model=self._provider.config.model,
+            context_window=self.runtime.context_window,
+            tool_defs=self._registry.definitions(),
+            replacement=self.runtime.replacement,
+            recovery=self.runtime.recovery,
+            auto_tracking=self.runtime.auto_tracking,
+            session=self.runtime.session,
+            usage_anchor=self.runtime.usage_anchor,
+            anchor_msg_len=self.runtime.anchor_msg_len,
+            estimated_token=est,
+            trigger=TriggerKind.EMERGENCY,
+        )
+
+        mc_err: Exception | None = None
+        try:
+            out = await manage_context(in_)
+        except Exception as e:
+            mc_err = e
+            out = ManageOutput(before_tokens=est, after_tokens=0)
+
+        yield Event(
+            compact=CompactEvent(
+                phase=CompactPhase.AFTER_EMERGENCY,
+                before=out.before_tokens,
+                after=out.after_tokens,
+                err=mc_err,
+            )
+        )
+
+        if mc_err is not None:
+            raise mc_err
+
+        self.runtime.usage_anchor = 0
+        self.runtime.anchor_msg_len = 0
+
+    async def run_force_compact(self, conv: Conversation, tool_defs: list[ToolDefinition]) -> tuple[int, int]:
+        """手动 /compact 入口，由 TUI 调用。"""
+        async with self._run_lock:
+            anchor = self.runtime.usage_anchor
+            anchor_len = self.runtime.anchor_msg_len
+            est = estimate_tokens(anchor, conv.messages, anchor_len)
+
+            in_ = ManageInput(
+                conv=conv,
+                provider=self._provider,
+                model=self._provider.config.model,
+                context_window=self.runtime.context_window,
+                tool_defs=tool_defs,
+                replacement=self.runtime.replacement,
+                recovery=self.runtime.recovery,
+                auto_tracking=self.runtime.auto_tracking,
+                session=self.runtime.session,
+                usage_anchor=anchor,
+                anchor_msg_len=anchor_len,
+                estimated_token=est,
+                trigger=TriggerKind.MANUAL,
+            )
+            out = await manage_context(in_)
+            return (out.before_tokens, out.after_tokens)
+
 
 # ── stream_once ───────────────────────────────────
 
@@ -178,11 +396,12 @@ async def _stream_once(
     conv: Conversation,
     sys: str,
     env_text: str,
-    defs: list,
+    defs: list[ToolDefinition],
     reminder: str,
     cancel: asyncio.Event,
     result: dict[str, Any],
 ) -> AsyncIterator[Event]:
+    """单轮流式请求。通过 result dict 返回 text/calls/usage/err。"""
     text = ""
     calls: list[ToolCall] = []
     usage: Usage | None = None
@@ -197,10 +416,14 @@ async def _stream_once(
     try:
         async for se in provider.stream(req):
             if cancel.is_set():
+                result["text"] = text
                 result["ok"] = False
                 return
             if se.err is not None:
-                yield Event(err=se.err)
+                result["text"] = text
+                result["calls"] = calls
+                result["usage"] = usage
+                result["err"] = se.err
                 result["ok"] = False
                 return
             if se.text:
@@ -215,17 +438,21 @@ async def _stream_once(
             if se.done:
                 break
     except Exception as e:
-        yield Event(err=e)
+        result["text"] = text
+        result["calls"] = calls
+        result["usage"] = usage
+        result["err"] = e
         result["ok"] = False
         return
 
     result["text"] = text
     result["calls"] = calls
     result["usage"] = usage
+    result["err"] = None
     result["ok"] = True
 
 
-# ── execute_batched（含权限判定）───────────────────
+# ── execute_batched（含权限判定 + ReadFile 追踪）────
 
 
 async def _execute_batched(
@@ -234,9 +461,10 @@ async def _execute_batched(
     calls: list[ToolCall],
     mode: Mode,
     cancel: asyncio.Event,
+    runtime: Any,
     result: dict[str, Any],
 ) -> AsyncIterator[Event]:
-    """保序分批并发执行，每工具前走权限判定。"""
+    """保序分批并发执行，每工具前走权限判定，ReadFile 成功后写 recovery。"""
     results: list[ToolResult | None] = [None] * len(calls)
     i = 0
 
@@ -250,12 +478,11 @@ async def _execute_batched(
         read_only = registry.is_read_only(calls[i].name)
 
         if read_only:
-            # 只读批：逐个 check（只读永不 Ask），Deny 项跳过执行
+            # 只读批
             j = i
             while j < len(calls) and registry.is_read_only(calls[j].name):
                 j += 1
 
-            # 先 check 所有
             denials: dict[int, tuple[Decision, str]] = {}
             for k in range(i, j):
                 d, reason = engine.check(mode, calls[k], True)
@@ -271,7 +498,7 @@ async def _execute_batched(
                     )
                 )
 
-            async def _run_one(k: int) -> None:
+            async def _run_read_only(k: int) -> None:
                 if k in denials:
                     _, reason = denials[k]
                     results[k] = ToolResult(tool_call_id=calls[k].id, content=reason, is_error=True)
@@ -280,8 +507,10 @@ async def _execute_batched(
                 results[k] = ToolResult(
                     tool_call_id=calls[k].id, content=exec_result.content, is_error=exec_result.is_error
                 )
+                # ReadFile 成功后写 recovery
+                await _track_read_file(runtime, calls[k], exec_result)
 
-            await asyncio.gather(*[_run_one(k) for k in range(i, j)])
+            await asyncio.gather(*[_run_read_only(k) for k in range(i, j)])
 
             for k in range(i, j):
                 r = results[k]
@@ -294,7 +523,7 @@ async def _execute_batched(
 
             i = j
         else:
-            # 有副作用 → 串行，走 check
+            # 有副作用 → 串行
             call = calls[i]
             d, reason = engine.check(mode, call, False)
 
@@ -305,9 +534,10 @@ async def _execute_batched(
                 results[i] = ToolResult(
                     tool_call_id=call.id, content=exec_result.content, is_error=exec_result.is_error
                 )
+                await _track_read_file(runtime, call, exec_result)
             elif d == Decision.DENY:
                 results[i] = ToolResult(tool_call_id=call.id, content=reason, is_error=True)
-            else:  # ASK → 人在回路
+            else:  # ASK
                 respond: asyncio.Future[Outcome] = asyncio.get_running_loop().create_future()
                 yield Event(
                     approval=ApprovalRequest(
@@ -332,6 +562,7 @@ async def _execute_batched(
                     results[i] = ToolResult(
                         tool_call_id=call.id, content=exec_result.content, is_error=exec_result.is_error
                     )
+                    await _track_read_file(runtime, call, exec_result)
 
             r = results[i]
             assert r is not None
@@ -344,6 +575,33 @@ async def _execute_batched(
 
     result["results"] = _pack_results(results)
     result["completed"] = True
+
+
+# ── ReadFile 追踪 ──────────────────────────────────
+
+
+async def _track_read_file(runtime: Any, call: ToolCall, exec_result: Any) -> None:
+    """ReadFile 成功后用纯净字节写入 RecoveryState。"""
+    if call.name != "read_file" or exec_result.is_error:
+        return
+    try:
+        args: dict = json.loads(call.input) if isinstance(call.input, str) else call.input
+    except (json.JSONDecodeError, TypeError):
+        return
+    if not isinstance(args, dict):
+        return
+    path = args.get("path")
+    if not isinstance(path, str) or not path:
+        return
+    try:
+        abs_path = str(Path(path).resolve())
+    except OSError:
+        return
+    try:
+        data = await asyncio.to_thread(Path(abs_path).read_bytes)
+        runtime.recovery.record_file(abs_path, data.decode("utf-8", errors="replace"))
+    except OSError:
+        pass
 
 
 # ── 辅助 ──────────────────────────────────────────
