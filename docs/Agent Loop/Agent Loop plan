@@ -4,16 +4,16 @@
 
 ## 架构概览ch04 不新增包，在 ch03「tool / agent / llm / conversation / prompt / tui」之上**扩展**：
 
-- **`mewcode.agent`（重写 run）**：把 ch03 的「请求#1 → 执行 → 请求#2 → 停」改为真正的 ReAct 循环——`for` 迭代直到自然完成 / 上限 / 取消 / 连续未知工具 / 出错。新增保序分批并发执行、迭代进度与用量事件、终止时的历史一致性收尾、Plan/Normal 两种模式。
-- **`mewcode.llm`（扩展）**：`StreamEvent` 增 `usage` 字段；`Provider.stream` 增 `system_suffix: str` 形参（Plan Mode 系统提示后缀）；两适配器在流结束后上抛本轮 token 用量、把 `system_suffix` 拼到内置系统提示后；OpenAI 打开 `stream_options={"include_usage": True}`。
-- **`mewcode.tool`（扩展）**：`Tool` Protocol 增 `read_only: bool` 属性；6 个工具各实现；`Registry` 增 `read_only_definitions()` 与 `is_read_only(name)`。
-- **`mewcode.conversation`（扩展）**：增 `last_role()`（终止收尾判断角色尾巴）。
-- **`mewcode.prompt`（扩展）**：增 `PLAN_MODE_REMINDER`（计划态系统后缀）与 `EXECUTE_DIRECTIVE`（`/do` 触发执行的用户消息）；`SYSTEM_PROMPT` 增补「持续工作直到任务完成」的 Agent 循环约定。
-- **`mewcode.tui`（扩展）**：`submit` 识别 `/plan`、`/do`；引入 per-turn 取消事件；事件泵处理用量 / 进度 / 通知 / 多个并发工具；按键处理拆分 Esc / Ctrl+C；状态栏显示模式与累计用量、动态区显示迭代轮次。
+- **`forgecode.agent`（重写 run）**：把 ch03 的「请求#1 → 执行 → 请求#2 → 停」改为真正的 ReAct 循环——`for` 迭代直到自然完成 / 上限 / 取消 / 连续未知工具 / 出错。新增保序分批并发执行、迭代进度与用量事件、终止时的历史一致性收尾、Plan/Normal 两种模式。
+- **`forgecode.llm`（扩展）**：`StreamEvent` 增 `usage` 字段；`Provider.stream` 增 `system_suffix: str` 形参（Plan Mode 系统提示后缀）；两适配器在流结束后上抛本轮 token 用量、把 `system_suffix` 拼到内置系统提示后；OpenAI 打开 `stream_options={"include_usage": True}`。
+- **`forgecode.tool`（扩展）**：`Tool` Protocol 增 `read_only: bool` 属性；6 个工具各实现；`Registry` 增 `read_only_definitions()` 与 `is_read_only(name)`。
+- **`forgecode.conversation`（扩展）**：增 `last_role()`（终止收尾判断角色尾巴）。
+- **`forgecode.prompt`（扩展）**：增 `PLAN_MODE_REMINDER`（计划态系统后缀）与 `EXECUTE_DIRECTIVE`（`/do` 触发执行的用户消息）；`SYSTEM_PROMPT` 增补「持续工作直到任务完成」的 Agent 循环约定。
+- **`forgecode.tui`（扩展）**：`submit` 识别 `/plan`、`/do`；引入 per-turn 取消事件；事件泵处理用量 / 进度 / 通知 / 多个并发工具；按键处理拆分 Esc / Ctrl+C；状态栏显示模式与累计用量、动态区显示迭代轮次。
 
 依赖方向不变、无环：`tool → llm`；`conversation → llm`；`agent → {llm, tool, conversation}`；`tui → {agent, tool, conversation, llm, prompt}`；`llm → {config, prompt}`。
 
-## 核心数据结构### `mewcode.llm`（扩展）
+## 核心数据结构### `forgecode.llm`（扩展）
 
 ```python
 from dataclasses import dataclass
@@ -51,7 +51,7 @@ class Provider(Protocol):
 
 `Message`/`ToolCall`/`ToolResult`/`ToolDefinition` 与 role 常量沿用 ch03，不变。
 
-### `mewcode.tool`（接口扩展）
+### `forgecode.tool`（接口扩展）
 
 ```python
 # Tool Protocol 新增 read_only：True=只读工具（可并发执行 & Plan Mode 放行）。
@@ -79,7 +79,7 @@ def is_read_only(self, name: str) -> bool:
     """分批判定；未知工具返回 False（按串行处理）。"""
 ```
 
-### `mewcode.agent`（事件模型扩展 + run 重写）
+### `forgecode.agent`（事件模型扩展 + run 重写）
 
 ```python
 from dataclasses import dataclass
@@ -138,7 +138,7 @@ NOTICE_STREAM_ERR     = "（请求出错，本轮已中断。）"
 NOTICE_CANCELLED      = "（已取消。）"
 ```
 
-## 模块设计### `mewcode.agent`（核心：run 重写）**职责：** ReAct 循环编排（F1/F2）、保序分批并发执行（F5）、事件流（F3/F8/F9）、终止历史一致性（F6）、Plan/Normal 模式（F10）。
+## 模块设计### `forgecode.agent`（核心：run 重写）**职责：** ReAct 循环编排（F1/F2）、保序分批并发执行（F5）、事件流（F3/F8/F9）、终止历史一致性（F6）、Plan/Normal 模式（F10）。
 **对外接口：** `Agent`、`Agent.run(conv, mode, cancel)`、`Event`、`ToolEvent`、`Phase`、`Mode`、`Usage`。
 **依赖：** `llm`、`tool`、`conversation`、`asyncio`（并发批 `asyncio.gather`）。
 
@@ -198,7 +198,7 @@ NOTICE_CANCELLED      = "（已取消。）"
 
 > 终止优先级：执行中取消（`completed is False`）是**最高优先级**终止——立即 `ensure_assistant_tail` 并 return，**跳过**未知工具计数与迭代上限检查。
 
-### `mewcode.llm`（扩展）**职责：** 协议无关请求/响应 + 两协议工具调用全流程（沿用 ch03）+ 本轮用量上抛（F8）+ 系统后缀（F10）。
+### `forgecode.llm`（扩展）**职责：** 协议无关请求/响应 + 两协议工具调用全流程（沿用 ch03）+ 本轮用量上抛（F8）+ 系统后缀（F10）。
 
 **`__init__.py`：** 新增 `Usage` 类型；`StreamEvent` 增 `usage: Usage | None`；`Provider.stream` 增 `system_suffix: str = ""` 形参（更新接口文档）。
 
@@ -212,14 +212,14 @@ NOTICE_CANCELLED      = "（已取消。）"
 - 系统提示：`_to_openai_messages` 接收 `suffix`，把首条 system 消息文本由 `SYSTEM_PROMPT` 改为拼接 `suffix`（非空时 `+ "\n\n" + suffix`）。
 - 用量：流末尾会出现一个 `choices == []` 但带 `chunk.usage` 的 chunk（启用 `include_usage` 后由 SDK 透传），读 `chunk.usage.prompt_tokens` / `chunk.usage.completion_tokens` → `yield StreamEvent(usage=Usage(...))`。
 
-### `mewcode.tool`（扩展）
+### `forgecode.tool`（扩展）
 
 - `Tool` Protocol 加 `read_only: bool` 属性；6 个工具各加一行实现（read/glob/grep 返回 True，write/edit/bash 返回 False）。
 - `Registry.read_only_definitions()`：仿 `definitions()`，仅收 `tools[name].read_only is True` 的项，保持注册顺序。
 - `Registry.is_read_only(name)`：`t = self.get(name); return t is not None and t.read_only`（未知工具 False）。
 - `execute`、`DEFAULT_TIMEOUT`、6 工具的执行逻辑均不变。
 
-### `mewcode.conversation`（扩展）
+### `forgecode.conversation`（扩展）
 
 ```python
 def last_role(self) -> str:
@@ -229,7 +229,7 @@ def last_role(self) -> str:
 
 其余沿用 ch03。
 
-### `mewcode.prompt`（扩展）
+### `forgecode.prompt`（扩展）
 
 ```python
 # PLAN_MODE_REMINDER：Plan Mode 系统提示后缀，拼接到 SYSTEM_PROMPT 之后。
@@ -246,7 +246,7 @@ EXECUTE_DIRECTIVE = "请按上面的计划开始执行。"
 
 `SYSTEM_PROMPT` 增补一句 Agent 循环约定（追加到现有文案）：`"Keep using tools across multiple steps to make progress, and only give your final concise answer once the task is complete."`（中文项目里保持英文 system prompt 风格，与 ch03 现有 `SYSTEM_PROMPT` 一致）。
 
-### `mewcode.tui`（扩展）**`MewCodeApp` 新增字段（`tui/app.py`）：**
+### `forgecode.tui`（扩展）**`MewCodeApp` 新增字段（`tui/app.py`）：**
 - `mode: agent.Mode`——当前模式（默认 `Mode.NORMAL`），`/plan`、`/do` 切换，跨轮保持。
 - `iter: int`——当前迭代轮次（进度显示），每轮 `iter` 事件更新，`finish_turn` 归零。
 - `usage_in: int`、`usage_out: int`——会话累计 token 用量，每个 `usage` 事件累加。
@@ -312,8 +312,8 @@ EXECUTE_DIRECTIVE = "请按上面的计划开始执行。"
 ## 文件组织
 
 ```
-mewcode/
-├── src/mewcode/
+forgecode/
+├── src/forgecode/
 │   ├── llm/
 │   │   ├── __init__.py            — 修改：新增 Usage；StreamEvent 加 usage；Provider.stream 加 system_suffix 形参
 │   │   ├── anthropic_provider.py  — 修改：_effective_system(suffix)；流结束上抛 usage
@@ -344,11 +344,11 @@ mewcode/
 ch04 改了两个签名，必须同步所有调用方/实现方，否则导入即报错：
 
 - **`Provider.stream` 增 `system_suffix: str = ""`（第 3 形参，给默认值方便逐步迁移）**：
-  - 实现方：`mewcode/llm/anthropic_provider.py`、`mewcode/llm/openai_provider.py`。
-  - 调用方：`mewcode/agent/__init__.py` 的 `stream_once`（唯一直接调用方）。
+  - 实现方：`forgecode/llm/anthropic_provider.py`、`forgecode/llm/openai_provider.py`。
+  - 调用方：`forgecode/agent/__init__.py` 的 `stream_once`（唯一直接调用方）。
   - 测试实现方：`tests/test_agent.py` 的 `FakeProvider.stream`（也实现该 Protocol，签名须同步）。
 - **`Agent.run` 增 `mode: Mode` 与 `cancel: asyncio.Event`**：
-  - 调用方：`mewcode/tui/stream.py`（`submit` 内）、`tests/test_agent.py`（各用例）。两者都要补 `mode` 与 `cancel` 实参（旧用例传 `Mode.NORMAL` + 一个未触发的 `asyncio.Event()`）。
+  - 调用方：`forgecode/tui/stream.py`（`submit` 内）、`tests/test_agent.py`（各用例）。两者都要补 `mode` 与 `cancel` 实参（旧用例传 `Mode.NORMAL` + 一个未触发的 `asyncio.Event()`）。
 
 ## 技术决策
 

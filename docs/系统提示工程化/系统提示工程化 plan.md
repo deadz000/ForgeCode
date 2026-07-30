@@ -118,7 +118,7 @@ class Provider(Protocol):
 **职责：** 把 `Request` 装配为各协议请求，分离缓存通道与消息通道，解析缓存用量，安全织入 reminder。
 **对外接口：** `stream(req: Request) -> AsyncIterator[StreamEvent]`。
 **关键点：**
-- 删除原 `_effective_system` 辅助函数与对 `mewcode.prompt` 的 import（系统提示改由 agent 传入）。
+- 删除原 `_effective_system` 辅助函数与对 `forgecode.prompt` 的 import（系统提示改由 agent 传入）。
 - **Anthropic**：构造 `system` 入参为 `list[dict]`：`req.system.stable` 非空 → `{"type": "text", "text": stable, "cache_control": {"type": "ephemeral"}}`（断点，默认 5m TTL）；`req.system.environment` 非空 → `{"type": "text", "text": environment}`（无 `cache_control`）。请求顺序 tools→system→messages，断点打在稳定块 → **缓存前缀 = 全部工具 + 稳定块**；env 与历史在断点后不缓存，env 每轮变化不影响前缀命中。`usage.cache_write = response.usage.cache_creation_input_tokens`、`cache_read = response.usage.cache_read_input_tokens`。
   - reminder 织入：`req.reminder` 非空时，把一个文本块 `{"type": "text", "text": reminder}` **追加到最后一条消息的 content 块**（循环中最后一条恒为 user 或 tool_result→user，追加文本块仍是合法 user 消息，保 N3 角色交替）；极端情形（末尾为 assistant）则新起一条 user 消息。
 - **OpenAI**：系统消息 = `req.system.stable`（若 `environment` 非空则拼为 `stable + "\n\n" + environment` 单条 system 消息——兼容端点对多条 system 消息支持不一，统一单条）；stable 居前缀 → 端点前缀缓存命中稳定部分。`usage.cache_read = response.usage.prompt_tokens_details.cached_tokens`、`cache_write = 0`。
@@ -135,7 +135,7 @@ class Provider(Protocol):
 - 删除 `suffix` / `READ_ONLY_DEFINITIONS` 的「系统后缀」用法；**只读工具集仍按 mode 选择**（规划=`READ_ONLY_DEFINITIONS`），原 `PLAN_MODE_REMINDER` 常量从系统后缀迁移为 `prompt.plan_reminder` 的内容。
 - 缓存用量透传：`Event(usage=Usage(input, output, cache_write, cache_read))`。
 
-### smoke（`src/mewcode/smoke.py` 或 `examples/smoke.py`）
+### smoke（`src/forgecode/smoke.py` 或 `examples/smoke.py`）
 **职责：** 端到端验证缓存生效。
 **关键点：** 消费 `Event.usage` 时打印 `input/output/cache_write/cache_read`；跑两轮（或多轮）观察次轮 `cache_read > 0`。`Agent(provider, registry, version="dev")`。
 
@@ -168,22 +168,22 @@ TUI/smoke ─run(ctx, conv, mode)→ agent
 ## 文件组织
 
 ```
-mewcode/
-├── src/mewcode/prompt/
+forgecode/
+├── src/forgecode/prompt/
 │   ├── __init__.py        — 改：导出 Module/装配/build_system_prompt；保留 banner（CAT_BANNER/render_banner/READY_HINT）
 │   ├── modules.py         — 新：fixed_modules()/optional_modules() 七固定+三空槽的内容常量
 │   ├── environment.py     — 新：Environment / gather_environment / Environment.render
 │   └── reminder.py        — 新：system_reminder / plan_reminder（完整版/精简版常量）/ EXECUTE_DIRECTIVE
-├── src/mewcode/llm/
+├── src/forgecode/llm/
 │   ├── __init__.py        — 改:Request/System dataclass；Usage 加缓存字段；Provider.stream 签名；删 _effective_system
 │   ├── anthropic_provider.py — 改：两块 system（断点+env）、缓存用量解析、reminder 织入
 │   └── openai_provider.py    — 改：单条 system（stable+env）、cached_tokens 解析、reminder 尾部注入
-├── src/mewcode/agent/
+├── src/forgecode/agent/
 │   └── agent.py           — 改：__init__(+version)、run 采集环境/装配系统、按轮次 reminder、缓存透传
-├── src/mewcode/tool/
+├── src/forgecode/tool/
 │   ├── edit_file.py       — 改：DESCRIPTION 补强化
 │   └── bash.py            — 改：DESCRIPTION 补强化
-├── src/mewcode/tui/
+├── src/forgecode/tui/
 │   └── stream.py          — 改：Agent(...) 传 version（m.version 已有）
 ├── examples/smoke.py      — 改：打印缓存用量；Agent(p, registry, "dev")
 └── tests/

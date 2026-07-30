@@ -1,8 +1,8 @@
-# MCP 客户端 Plan> 技术栈：Python 3.12+；使用 **官方 SDK** `mcp`（`pip install mcp` / `uv add mcp`，import 名 `mcp`）承载协议层（JSON-RPC 编解码、`initialize` 握手、stdio 与 Streamable HTTP 传输）。本章新增 **`mewcode.mcp` 子包** 与入口装配，**不改 tool / agent / tui / permission / llm / config / conversation / prompt**。
+# MCP 客户端 Plan> 技术栈：Python 3.12+；使用 **官方 SDK** `mcp`（`pip install mcp` / `uv add mcp`，import 名 `mcp`）承载协议层（JSON-RPC 编解码、`initialize` 握手、stdio 与 Streamable HTTP 传输）。本章新增 **`forgecode.mcp` 子包** 与入口装配，**不改 tool / agent / tui / permission / llm / config / conversation / prompt**。
 
-## 架构概览- **`mewcode.mcp` 子包（新增）**：承载 MCP 客户端的全部职责——配置加载与两层合并、`${VAR}` 展开、字段校验、调用 SDK 建立 stdio / HTTP 会话、把远端工具适配成内置 `Tool` 协议、统一管理生命周期。仅依赖 `mewcode.tool`、SDK 与标准库；不依赖 agent / tui / permission / conversation。
-- **`mewcode.cli`（改造）**：在 `tool.default_registry()` 之后、`permission.PermissionEngine(...)` 与 `MewCodeApp(...).run()` 之前，加载 mcp 配置 → 启动 Manager → 把 Manager 产出的工具注册进 registry → 退出时 `await manager.close()`（包在 `try/finally` 中）。
-- **`mewcode.tool` 包（零改）**：`Registry.register` 与 `Tool` 协议本就是开放抽象，直接吃 `McpTool` 实例；`is_read_only` 对 MCP 工具返回正确值。
+## 架构概览- **`forgecode.mcp` 子包（新增）**：承载 MCP 客户端的全部职责——配置加载与两层合并、`${VAR}` 展开、字段校验、调用 SDK 建立 stdio / HTTP 会话、把远端工具适配成内置 `Tool` 协议、统一管理生命周期。仅依赖 `forgecode.tool`、SDK 与标准库；不依赖 agent / tui / permission / conversation。
+- **`forgecode.cli`（改造）**：在 `tool.default_registry()` 之后、`permission.PermissionEngine(...)` 与 `MewCodeApp(...).run()` 之前，加载 mcp 配置 → 启动 Manager → 把 Manager 产出的工具注册进 registry → 退出时 `await manager.close()`（包在 `try/finally` 中）。
+- **`forgecode.tool` 包（零改）**：`Registry.register` 与 `Tool` 协议本就是开放抽象，直接吃 `McpTool` 实例；`is_read_only` 对 MCP 工具返回正确值。
 - **agent / tui 包（零改）**：工具流转链路对工具来源透明。
 - **permission 包（零改）**：`friendly_name` 对未知名原样返回 → 规则可写 `mcp__<server>__<tool>`；`categorize` 在 `read_only==True` 时走 CategoryRead、否则归 CategoryExec → 模式兜底矩阵自然命中；`extract_target` 对未知工具返回 `("", False, False)`，黑名单与沙箱自动跳过。
 - **llm / provider（零改）**：工具定义透传，协议无关。
@@ -18,7 +18,7 @@ agent.execute_batched(calls, mode)
        └→ ToolResult(content, is_error)                ── 回灌 conv
 ```
 
-## 核心数据结构### `mewcode.mcp.Config` / `mewcode.mcp.ServerConfig`（对外）
+## 核心数据结构### `forgecode.mcp.Config` / `forgecode.mcp.ServerConfig`（对外）
 ```python
 from dataclasses import dataclass, field
 from typing import Literal
@@ -39,7 +39,7 @@ class Config:
     servers: dict[str, ServerConfig] = field(default_factory=dict)
 ```
 
-### `mewcode.mcp.Manager`（对外不透明）
+### `forgecode.mcp.Manager`（对外不透明）
 ```python
 import asyncio
 from contextlib import AsyncExitStack
@@ -60,7 +60,7 @@ class _Session:
 
 ### 工具适配（包内私有）
 ```python
-# McpTool 实现 mewcode.tool.Tool 协议。
+# McpTool 实现 forgecode.tool.Tool 协议。
 @dataclass
 class McpTool:
     full_name: str                    # "mcp__<server>__<tool>"
@@ -80,7 +80,7 @@ class CallerSession(Protocol):
 
 ```python
 # 加载并合并两层配置；返回归一化的 Config。
-# - root: 项目根（用来定位 <root>/.mewcode.yaml）
+# - root: 项目根（用来定位 <root>/.forgecode.yaml）
 # - 文件不存在 → 视为空层；格式非法 → 跳过该层 + stderr 告警（降级，N1）
 # - 内部完成 ${VAR} 展开与字段校验（非法 server 直接剔除，N2）
 # - 永不抛出（签名只返 Config）
@@ -88,7 +88,7 @@ def load_config(root: str) -> Config: ...
 
 # 启动 Manager：并发连接所有 server，每个 server 30s 超时，失败仅跳过 + 告警。
 # 阻塞直到所有 server 的尝试结束（成功 / 失败 / 超时）。
-# version 透传到 Implementation.version（便于 server 端识别 mewcode 版本）。
+# version 透传到 Implementation.version（便于 server 端识别 forgecode 版本）。
 async def new_manager(cfg: Config, version: str) -> Manager: ...
 
 # 返回适配好的工具列表（按 server 名 → 工具名 稳定排序）。
@@ -98,7 +98,7 @@ def Manager.tools(self) -> list[McpTool]: ...
 async def Manager.close(self) -> None: ...
 ```
 
-## 模块设计### `src/mewcode/mcp/config.py`
+## 模块设计### `src/forgecode/mcp/config.py`
 **职责：** 加载两层 YAML、合并、展开 `${VAR}`、校验。
 **关键点：**
 - 内部 `@dataclass class _RawServer`（含全部可能字段：type / command / args / env / url / headers，可选）。
@@ -114,11 +114,11 @@ async def Manager.close(self) -> None: ...
   - `stdio` 必填 `command`；`http` 必填 `url`；缺失则跳过；
   - 违规时 stderr 告警 `[mcp] warn: skip server <name>: <reason>`。
 - `load_config(root: str) -> Config`：
-  - 用户级 = `Path.home() / ".mewcode" / "config.yaml"`；项目级 = `Path(root) / ".mewcode.yaml"`。
+  - 用户级 = `Path.home() / ".forgecode" / "config.yaml"`；项目级 = `Path(root) / ".forgecode.yaml"`。
   - 两层各自 `_load_file` + `_apply_expansion`；任一层解析失败 stderr 一行告警并跳过（该层视为空）。
   - `_merge_servers` 后逐个 `_validate_server`，组装 `Config`。
 
-### `src/mewcode/mcp/manager.py`
+### `src/forgecode/mcp/manager.py`
 **职责：** 连接 server、缓存会话、关闭。
 **关键点：**
 - `connect_timeout`、`close_timeout` 作为模块级变量（非常量），便于单测临时改小，结束 restore。生产值 30s / 5s。
@@ -153,7 +153,7 @@ async def Manager.close(self) -> None: ...
     transport = await mgr._stack.enter_async_context(ctx)
     read, write = transport[0], transport[1]    # http 返回 3 元组，第三个是 metadata
     session = await mgr._stack.enter_async_context(
-        ClientSession(read, write, client_info=Implementation(name="mewcode", version=version))
+        ClientSession(read, write, client_info=Implementation(name="forgecode", version=version))
     )
     await session.initialize()                  # 握手
     listed = await session.list_tools()
@@ -165,8 +165,8 @@ async def Manager.close(self) -> None: ...
   - `TimeoutError` → stderr 告警 `[mcp] warn: close timeout (5s), some sessions may leak`，不再等。
 - `Manager.tools()`：返回 `list(self._tools)` 副本（防外部修改）。
 
-### `src/mewcode/mcp/tool.py`
-**职责：** 把 SDK 返回的 `mcp.types.Tool` 适配为 mewcode `Tool` 协议。
+### `src/forgecode/mcp/tool.py`
+**职责：** 把 SDK 返回的 `mcp.types.Tool` 适配为 forgecode `Tool` 协议。
 **关键点：**
 - 包级 `_VALID_NAME = re.compile(r"^[A-Za-z0-9_-]+$")`。
 - 包级 `_non_text_warn_once: set[str] = set()`，配 `asyncio.Lock`（或在单线程 asyncio 中直接用 set）记录已告警的 `full_name`。
@@ -176,7 +176,7 @@ async def Manager.close(self) -> None: ...
   - `description`：`t.description` 为空时兜底 `f"来自 MCP server {server_name} 的工具 {t.name}"`。
   - `parameters`：`t.inputSchema` 转 `dict[str, Any]`（已是 dict 则 `dict(...)` 浅拷贝；为空时给 `{"type": "object"}` 兜底，避免 provider 拒收）。
   - `read_only`：`bool(t.annotations and t.annotations.readOnlyHint)`（None-safe）。
-- `McpTool.name / description / parameters / read_only`：通过 dataclass 字段直接暴露（mewcode `Tool` 协议要求的属性/方法返回字段值）。
+- `McpTool.name / description / parameters / read_only`：通过 dataclass 字段直接暴露（forgecode `Tool` 协议要求的属性/方法返回字段值）。
 - `async def McpTool.execute(self, args: dict[str, Any] | None) -> ToolResult`：
   - `arg_map = args if args else None`（空 dict / None 视作无参数）；
   - ```python
@@ -193,11 +193,11 @@ async def Manager.close(self) -> None: ...
   - 遍历 `result.content`：`isinstance(block, mcp.types.TextContent)` → 收集 `block.text`；其余块计数，首次出现时 stderr 告警 `[mcp] warn: tool <full_name> returned non-text content blocks (dropped)`（per `full_name` 限一次）。
   - 用 `"\n".join(texts)` 拼出 `content`；返回 `ToolResult(content=content, is_error=bool(result.isError))`。
 
-### `src/mewcode/cli.py`（改造）
+### `src/forgecode/cli.py`（改造）
 位置：在 `registry = tool.default_registry()` 之后、`PermissionEngine(...)` 之前插入：
 ```python
 import asyncio
-from mewcode import mcp as mcp_client
+from forgecode import mcp as mcp_client
 
 async def _amain() -> int:
     ...
@@ -222,9 +222,9 @@ def main() -> None:
 ## 文件组织
 
 ```
-mewcode/
+forgecode/
 ├── pyproject.toml                       — 改：dependencies 增加 "mcp>=1.0"
-├── src/mewcode/
+├── src/forgecode/
 │   ├── mcp/
 │   │   ├── __init__.py                  — 新：暴露 Config / ServerConfig / Manager / load_config / new_manager
 │   │   ├── config.py                    — 新：Config / ServerConfig、load_config、_load_file、_expand_vars、_merge_servers、_validate_server
@@ -246,12 +246,12 @@ mewcode/
 | 决策点 | 选择 | 理由 |
 |---|---|---|
 | 协议层实现 | 官方 Python SDK（`mcp`，PyPI 包名 `mcp`） | 用户拍板；避免自研 JSON-RPC / 握手 / 帧；SDK 已处理 stdio (`stdio_client`) 与 Streamable HTTP (`streamablehttp_client`) |
-| 配置文件位置 | 项目级 `<root>/.mewcode.yaml` + 用户级 `~/.mewcode/config.yaml` | 用户拍板；项目级 dotfile 一眼可见、与现有 `.mewcode/config.yaml`（providers 凭据）分离 |
+| 配置文件位置 | 项目级 `<root>/.forgecode.yaml` + 用户级 `~/.forgecode/config.yaml` | 用户拍板；项目级 dotfile 一眼可见、与现有 `.forgecode/config.yaml`（providers 凭据）分离 |
 | 配置层数 | 仅两层，无本地级 | 用户拍板；`${VAR}` 已让密钥不入配置，本地层冗余 |
 | 合并语义 | server 名维度，项目级完整覆盖 | 避免字段级半合并出畸形 server |
 | server 类型字段 | 显式 `type: stdio\|http` | 不靠字段嗅探（防止误判）；未来扩展易加（如 sse） |
 | 变量展开范围 | 仅 env / headers 的值 | 避免 command / args / server 名 / 工具名被环境间接影响；凭据走 env / headers 已足够 |
-| 未定义变量 | 空串 + 一次性告警（不阻断） | server 自决无凭据时是否能跑；mewcode 不替它拍板 |
+| 未定义变量 | 空串 + 一次性告警（不阻断） | server 自决无凭据时是否能跑；forgecode 不替它拍板 |
 | 工具命名 | `mcp__<server>__<tool>` | 用户拍板；Claude Code 风格；LLM 工具名安全字符；一眼识别来源 |
 | 启动连接策略 | 同步进 TUI 前完成 + `asyncio.gather` 并发每 server `asyncio.wait_for(30s)` 超时 + 失败跳过 | 进 TUI 时工具集稳定；asyncio 并发缩短总时延；隔离避免单 server 拖死启动 |
 | 调用超时 | 30s 硬编码 `asyncio.wait_for`，转 is_error | 与连接同值；不中断 Loop；避免长卡 |
@@ -298,4 +298,4 @@ agent.execute_batched(calls, mode)
   └ ToolResult 回灌 conv
 ```
 
-依赖方向（无环）：`mewcode.cli → mewcode.mcp → {mewcode.tool, mcp(SDK), 标准库}`；`mewcode.mcp` 不依赖 agent / tui / permission / conversation。
+依赖方向（无环）：`forgecode.cli → forgecode.mcp → {forgecode.tool, mcp(SDK), 标准库}`；`forgecode.mcp` 不依赖 agent / tui / permission / conversation。

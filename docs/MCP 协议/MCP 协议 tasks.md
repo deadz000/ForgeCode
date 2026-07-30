@@ -3,14 +3,14 @@
 | 操作 | 文件 | 职责 |
 |------|------|------|
 | 改   | `pyproject.toml` | `dependencies` 增加 `"mcp>=1.0"`；`uv sync` / `pip install -e .` 同步 |
-| 新建 | `src/mewcode/mcp/__init__.py` | 暴露 `Config` / `ServerConfig` / `Manager` / `load_config` / `new_manager` |
-| 新建 | `src/mewcode/mcp/config.py` | `Config` / `ServerConfig`、`load_config`、`_load_file`、`_expand_vars`、`_apply_expansion`、`_merge_servers`、`_validate_server` |
+| 新建 | `src/forgecode/mcp/__init__.py` | 暴露 `Config` / `ServerConfig` / `Manager` / `load_config` / `new_manager` |
+| 新建 | `src/forgecode/mcp/config.py` | `Config` / `ServerConfig`、`load_config`、`_load_file`、`_expand_vars`、`_apply_expansion`、`_merge_servers`、`_validate_server` |
 | 新建 | `tests/test_mcp_config.py` | 两层合并 / `${VAR}` 展开 / 字段校验 / 降级 单测 |
-| 新建 | `src/mewcode/mcp/tool.py` | `CallerSession` Protocol、`McpTool`、`adapt_tool`、`execute`、非 text 块告警 once set |
+| 新建 | `src/forgecode/mcp/tool.py` | `CallerSession` Protocol、`McpTool`、`adapt_tool`、`execute`、非 text 块告警 once set |
 | 新建 | `tests/test_mcp_tool.py` | 命名拼接 / 禁用字符 / Execute 成功 / 远端 IsError / 超时 / 协议错 / 非 text 块跳过 单测 |
-| 新建 | `src/mewcode/mcp/manager.py` | `Manager`、`_Session`、`new_manager`（`asyncio.gather` 并发 + 30s 超时）、`close`（5s 兜底）、`tools`；模块级 `connect_timeout` / `close_timeout` |
+| 新建 | `src/forgecode/mcp/manager.py` | `Manager`、`_Session`、`new_manager`（`asyncio.gather` 并发 + 30s 超时）、`close`（5s 兜底）、`tools`；模块级 `connect_timeout` / `close_timeout` |
 | 新建 | `tests/test_mcp_manager.py` | 连接成功 / 失败 / 超时、`close` 不死锁、并发写共享状态安全 单测 |
-| 改   | `src/mewcode/cli.py` | 装配 `load_config`、`new_manager`、注册 MCP 工具、`finally: await mgr.close()` |
+| 改   | `src/forgecode/cli.py` | 装配 `load_config`、`new_manager`、注册 MCP 工具、`finally: await mgr.close()` |
 | 新建 | `docs/ch07/mcp-servers.example.yaml` | 配置示例（含 stdio / http 各一个，用 `${VAR}`） |
 
 ---
@@ -27,11 +27,11 @@
    from mcp.client.streamable_http import streamablehttp_client
    import mcp.types as mtypes
    ```
-   并在 Python REPL 跑一次 `import mewcode.mcp` 雏形，验证可用。
+   并在 Python REPL 跑一次 `import forgecode.mcp` 雏形，验证可用。
 
 **验证：** `python -c "import mcp; print(mcp.__version__ if hasattr(mcp,'__version__') else 'ok')"` 输出非错误；`uv pip list | grep mcp` 看到包名。
 
-## T2: 配置类型与加载（含两层合并 + 变量展开 + 字段校验）**文件：** `src/mewcode/mcp/config.py`、`src/mewcode/mcp/__init__.py`、`tests/test_mcp_config.py`
+## T2: 配置类型与加载（含两层合并 + 变量展开 + 字段校验）**文件：** `src/forgecode/mcp/config.py`、`src/forgecode/mcp/__init__.py`、`tests/test_mcp_config.py`
 **依赖：** T1
 **步骤：**
 1. 定义对外类型 `ServerConfig`、`Config`（见 plan.md「核心数据结构」），用 `@dataclass`。
@@ -53,26 +53,26 @@
    - `stdio` 必填 `command`；`http` 必填 `url`；缺失则跳过；
    - 违规时 `print(f"[mcp] warn: skip server {name}: {reason}", file=sys.stderr)`；返回 `None`。
 8. `load_config(root: str) -> Config`：
-   - 用户级 = `Path.home() / ".mewcode" / "config.yaml"`（`Path.home()` 失败时跳过用户层不致错，用 `try/except` 兜底）；项目级 = `Path(root) / ".mewcode.yaml"`。
+   - 用户级 = `Path.home() / ".forgecode" / "config.yaml"`（`Path.home()` 失败时跳过用户层不致错，用 `try/except` 兜底）；项目级 = `Path(root) / ".forgecode.yaml"`。
    - 两层各自 `_load_file`；返回空 dict 即视为该层为空。
    - 对每层各 server 跑 `_apply_expansion`。
    - `_merge_servers` 后逐个 `_validate_server`，收齐合法 server 组装 `Config`。
    - 永不抛出。
-9. `src/mewcode/mcp/__init__.py` 中 `from .config import Config, ServerConfig, load_config`。
+9. `src/forgecode/mcp/__init__.py` 中 `from .config import Config, ServerConfig, load_config`。
 
-**验证：** `python -c "from mewcode.mcp import load_config, Config"` 不报错；`pytest tests/test_mcp_config.py` 覆盖：
+**验证：** `python -c "from forgecode.mcp import load_config, Config"` 不报错；`pytest tests/test_mcp_config.py` 覆盖：
 - 两文件缺失 → `Config.servers` 为空字典、无异常；
 - 仅用户级 / 仅项目级 / 都有（同名 server 项目级胜出，断言字段为项目级值）；
 - 文件格式非法 → 跳过该层、其它正常加载、`capsys.readouterr().err` 中包含告警；
 - `${VAR}` 已定义（用 `monkeypatch.setenv`）→ 展开为环境值；未定义 → 空串 + 告警；`command` / `args` 中含 `${VAR}` → 不展开（保留字面量）；
 - type 缺失 / type 非法 / stdio 缺 command / http 缺 url → 该 server 被跳过，其它 server 不受影响。
 
-## T3: 工具适配（McpTool）**文件：** `src/mewcode/mcp/tool.py`、`tests/test_mcp_tool.py`
+## T3: 工具适配（McpTool）**文件：** `src/forgecode/mcp/tool.py`、`tests/test_mcp_tool.py`
 **依赖：** T1
 **步骤：**
-1. `import mcp.types as mtypes`；`from mewcode.tool import Tool, ToolResult`（或对应内置工具协议路径，按现有命名为准）。
+1. `import mcp.types as mtypes`；`from forgecode.tool import Tool, ToolResult`（或对应内置工具协议路径，按现有命名为准）。
 2. 定义最小 Protocol `CallerSession` 与 `@dataclass class McpTool`（见 plan.md「核心数据结构」）。
-3. 实现 mewcode `Tool` 协议要求的属性 / 方法：`name`（返回 `full_name`）、`description`、`parameters`、`read_only`、`async def execute(args)`。
+3. 实现 forgecode `Tool` 协议要求的属性 / 方法：`name`（返回 `full_name`）、`description`、`parameters`、`read_only`、`async def execute(args)`。
 4. `def adapt_tool(server_name: str, t: mtypes.Tool, session: CallerSession) -> McpTool | None`：
    - `full_name = f"mcp__{server_name}__{t.name}"`；
    - 用包级 `_VALID_NAME = re.compile(r"^[A-Za-z0-9_-]+$")` 校验 `full_name`，不通过 → 返回 `None` + stderr 告警 `[mcp] warn: skip tool <full_name>: name contains illegal characters`。
@@ -108,7 +108,7 @@
   - 阻塞至超时（stub `await asyncio.Event().wait()` + 模块级 timeout `monkeypatch` 改 200ms）→ `is_error=True`，content 含 `超时`；
   - 非 text 块跳过 + `texts` 仅含 text + `_non_text_warn_once` 同 `full_name` 多次调用只告警一次。
 
-## T4: 连接管理器（Manager）**文件：** `src/mewcode/mcp/manager.py`、`src/mewcode/mcp/__init__.py`（追加导出）、`tests/test_mcp_manager.py`
+## T4: 连接管理器（Manager）**文件：** `src/forgecode/mcp/manager.py`、`src/forgecode/mcp/__init__.py`（追加导出）、`tests/test_mcp_manager.py`
 **依赖：** T2、T3
 **步骤：**
 1. 模块级变量（非常量，便于单测改）：
@@ -135,7 +135,7 @@
 5. `async def _do_connect(mgr, name, srv, version)`：
    - 按 `srv.type` 构造 transport 上下文（`stdio_client` / `streamablehttp_client`）；
    - 通过 `mgr._stack.enter_async_context(...)` 进入 transport 上下文，拿到 `(read, write)` 或 `(read, write, _metadata)`；
-   - 再进入 `ClientSession(read, write, client_info=mtypes.Implementation(name="mewcode", version=version))` 上下文；
+   - 再进入 `ClientSession(read, write, client_info=mtypes.Implementation(name="forgecode", version=version))` 上下文；
    - `await session.initialize()`；
    - `listed = await session.list_tools()`；
    - 对 `listed.tools` 调 `adapt_tool(name, t, session)`，收齐 list；
@@ -148,7 +148,7 @@
    except asyncio.TimeoutError:
        print(f"[mcp] warn: close timeout ({close_timeout}s), some sessions may leak", file=sys.stderr)
    ```
-8. `src/mewcode/mcp/__init__.py` 追加 `from .manager import Manager, new_manager`、`from .tool import McpTool`。
+8. `src/forgecode/mcp/__init__.py` 追加 `from .manager import Manager, new_manager`、`from .tool import McpTool`。
 
 **验证：** `pytest tests/test_mcp_manager.py`（`pytest-asyncio` `@pytest.mark.asyncio`）覆盖：
 - 空 `cfg` → `Manager.tools()` 为空、`close()` 立即返回；
@@ -157,10 +157,10 @@
 - close 兜底：注入一个 close 阻塞的 fake context manager（`__aexit__` 内 `await asyncio.Event().wait()`），把 `close_timeout` 改 0.2，断言 `close()` 在 0.2s 内返回；
 - 并发安全：`pytest --asyncio-mode=auto` 默认就跑在单线程 event loop；额外检查 `_tools` 顺序由 `sort` 决定而非 task 完成顺序。
 
-## T5: cli 接线**文件：** `src/mewcode/cli.py`
+## T5: cli 接线**文件：** `src/forgecode/cli.py`
 **依赖：** T2、T3、T4
 **步骤：**
-1. import `asyncio`、`mewcode.mcp as mcp_client`。
+1. import `asyncio`、`forgecode.mcp as mcp_client`。
 2. 把现有 `main()` 拆为 `async def _amain() -> int` + `def main() -> None: raise SystemExit(asyncio.run(_amain()))`（若已是 async 结构则直接接线）。
 3. 在 `registry = tool.default_registry()` 之后插入：
    ```python
@@ -176,14 +176,14 @@
    ```
 4. `root` 复用 `os.getcwd()`；`version` 复用 `__version__`。
 
-**验证：** `python -m mewcode` 无 MCP 配置时进 TUI、内置 6 工具可用；配一个 command 不存在的 stdio server 时进 TUI 不阻塞、stderr 显示连接失败告警。
+**验证：** `python -m forgecode` 无 MCP 配置时进 TUI、内置 6 工具可用；配一个 command 不存在的 stdio server 时进 TUI 不阻塞、stderr 显示连接失败告警。
 
 ## T6: 配置示例**文件：** `docs/ch07/mcp-servers.example.yaml`
 **依赖：** 无（可与 T2 并行）
 **步骤：**
 1. 内容（用 YAML 注释说明放置位置与覆盖语义）：
    ```yaml
-   # 项目级放 <root>/.mewcode.yaml；用户级放 ~/.mewcode/config.yaml。
+   # 项目级放 <root>/.forgecode.yaml；用户级放 ~/.forgecode/config.yaml。
    # 同名 server 项目级完整覆盖用户级。
    # env / headers 的值支持 ${VAR} 从宿主环境变量展开；command/args 不展开。
    mcp_servers:
@@ -210,7 +210,7 @@
 **依赖：** T1–T6
 **步骤：**
 1. 准备一个真实可用的 stdio MCP server。优先用 `npx -y @modelcontextprotocol/server-everything`（官方示例 server，自带 echo / add 等基础工具）；若无 npx，可临时用一个最小 Python server（`uv run mcp dev examples/...` 风格）。
-2. 在项目根写一个临时 `.mewcode.yaml` 指向它：
+2. 在项目根写一个临时 `.forgecode.yaml` 指向它：
    ```yaml
    mcp_servers:
      demo:
@@ -218,22 +218,22 @@
        command: npx
        args: ["-y", "@modelcontextprotocol/server-everything"]
    ```
-3. `tmux` 起 mewcode：
+3. `tmux` 起 forgecode：
    - 启动日志（stderr）显示 server 连接成功 + 工具数；TUI 状态栏正常；
    - 让模型调用 `mcp__demo__echo` 一类工具：default 模式下弹人在回路 → 允许本次 → 工具结果回灌 → 模型续答；
-   - 选"永久允许"后，本地权限规则被写入；重启 mewcode 后再调同工具不再弹窗（验证永久规则与 ch07 命名空间联动）；
+   - 选"永久允许"后，本地权限规则被写入；重启 forgecode 后再调同工具不再弹窗（验证永久规则与 ch07 命名空间联动）；
    - 切到 bypassPermissions：调用不弹窗；但让模型跑 `rm -rf /` 仍被内置黑名单拦下（MCP 工具不绕过黑名单的内置作用域）；
    - Esc 取消弹窗：干净回到 idle，不退出程序；
-   - 退出 mewcode（`/exit` 或 Ctrl+C）后 `ps -ef | grep server-everything` 确认子进程已终止；
+   - 退出 forgecode（`/exit` 或 Ctrl+C）后 `ps -ef | grep server-everything` 确认子进程已终止；
 4. 配置一个 command 不存在的 server + 一个能跑的 server：启动 stderr 有失败告警，能跑的 server 工具仍可用。
 
-**验证：** 上述全部观察通过；删除临时 `.mewcode.yaml`，恢复项目根干净。
+**验证：** 上述全部观察通过；删除临时 `.forgecode.yaml`，恢复项目根干净。
 
 ## T8: 全量编译测试与规范**文件：** —
 **依赖：** T1–T7
 **步骤：**
 1. `ruff format --check .`（应无 diff）；`ruff check .`（应无告警）。
-2. （可选）`mypy src/mewcode/mcp`（启用 strict 子集亦可）。
+2. （可选）`mypy src/forgecode/mcp`（启用 strict 子集亦可）。
 3. `pytest`（含新增的 `tests/test_mcp_*.py`）。
 4. `pytest --asyncio-mode=auto tests/test_mcp_manager.py tests/test_agent/` 之类——重点守护 Manager 并发连接、共享状态、close 兜底无悬挂 task / 死锁。
 5. `git grep -E '(Bearer|sk-|ghp_|github_pat_)[A-Za-z0-9_-]{16,}'`（应无命中：凭据不落盘）。

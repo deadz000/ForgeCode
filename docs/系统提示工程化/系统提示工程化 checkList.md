@@ -24,11 +24,11 @@
 - [ ] 界面不阻塞：环境采集（含 git 外调）不冻结界面、不显著拖慢首字（验证：正常目录跑，观察发起延迟无异常；git 调用以 `subprocess.run(..., timeout=2)` 或 `asyncio.to_thread` 收口）。(N4)
 
 ## 编译与测试
-- [ ] `python -m mewcode` 在合法配置下能正常启动。
+- [ ] `python -m forgecode` 在合法配置下能正常启动。
 - [ ] `ruff check .` 无告警。
 - [ ] `ruff format --check .` 通过。
 - [ ] `pytest` 通过（`tests/test_config.py`、`tests/test_conversation.py`、`tests/test_tool.py`、`tests/test_agent.py`、`tests/test_prompt.py`、`tests/test_anthropic_system.py`）。
-- [ ] （可选）`mypy src/mewcode` 通过子集检查。(N2/N6)
+- [ ] （可选）`mypy src/forgecode` 通过子集检查。(N2/N6)
 - [ ] 密钥不回显：对话区、环境段与任何输出均不出现 `api_key`（验证：通读输出、检索无明文 key；确认环境段不含环境变量）。(AC14/N5)
 
 ## 端到端场景（tmux 实跑）

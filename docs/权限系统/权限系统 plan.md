@@ -310,8 +310,8 @@ TUI ─begin_turn→ agent.new_agent(provider, registry, version, engine).run(co
 ## 文件组织
 
 ```
-mewcode/
-├── src/mewcode/permission/
+forgecode/
+├── src/forgecode/permission/
 │   ├── __init__.py        — 新:Mode 四档 + str/parse_mode;Decision/Category;Outcome；对外暴露 Engine/check/persist_local_allow
 │   ├── engine.py          — 新:Engine、new_engine、check 前四层流水线、mode_fallback、start_mode
 │   ├── blacklist.py       — 新:内置危险命令正则集 + hits_blacklist（不可配，N1）
@@ -319,20 +319,20 @@ mewcode/
 │   ├── rule.py            — 新:Rule/RuleSet、parse_rule、match、match_pattern(glob)
 │   ├── settings.py        — 新:Settings YAML、load_settings、to_rule_set、friendly_name、categorize、extract_target
 │   └── persist.py         — 新:persist_local_allow、rule_for（写本地层文件）
-├── src/mewcode/agent.py   — 改:删 Mode（迁 permission）;Agent 加 engine;execute_batched(+mode)接入 check;request_approval;ApprovalRequest 事件;Deny 用 ToolResult 构造
-├── src/mewcode/tui/
+├── src/forgecode/agent.py   — 改:删 Mode（迁 permission）;Agent 加 engine;execute_batched(+mode)接入 check;request_approval;ApprovalRequest 事件;Deny 用 ToolResult 构造
+├── src/forgecode/tui/
 │   ├── app.py             — 改:mode→permission.Mode、加 engine/pending/approve_cursor;new_app 增参;Approving 态分派;全局 ctrl+c/esc 覆盖 approving;shift+tab 循环模式(next_mode)
 │   ├── stream.py          — 改:处理 ApprovalRequest;update_approving;submit 保留 /plan·/do(去掉 /mode);begin_turn 传 engine
 │   └── view.py            — 改:status_bar 左侧常驻模式(取代 provider 名);待批准块渲染
-├── src/mewcode/config.py  — 不改（provider 配置与 permission settings 分离）
-├── src/mewcode/cli.py     — 改:构造 permission.Engine 注入 tui
+├── src/forgecode/config.py  — 不改（provider 配置与 permission settings 分离）
+├── src/forgecode/cli.py     — 改:构造 permission.Engine 注入 tui
 ├── smoke/main.py          — 改:cwd + 构造引擎、Mode.BYPASS 运行
 ├── tests/
 │   ├── test_permission_*.py  — 新:黑名单/沙箱(含祖先回退)/规则/优先级/矩阵/加载降级/解析失败 单测
 │   ├── test_agent.py      — 改/新:权限集成(Allow/Deny/Ask/会话/永久)、保序、只读并发不退化、取消、模式迁移
 │   └── test_tui.py        — 改/新:shift+tab 循环切换、approval 态按键回传、Esc 取消兜底、状态栏常驻模式、模式跨轮保持
-├── .gitignore             — 改:加 .mewcode/settings.local.yaml
-└── .mewcode/settings.yaml.example — 新:权限配置示例（default_mode + allow/deny）
+├── .gitignore             — 改:加 .forgecode/settings.local.yaml
+└── .forgecode/settings.yaml.example — 新:权限配置示例（default_mode + allow/deny）
 ```
 
 ## 技术决策
@@ -352,7 +352,7 @@ mewcode/
 | plan 语义 | 沿用 ch04 硬限制（只读工具集+提醒）+ /do | 用户拍板；矩阵 plan 行仅防御性兜底；/plan 与 default_mode=plan 都按 Mode.PLAN 应用 |
 | 模式兜底值域 | 只产 Allow/Ask（无 Deny 档） | 用户拍板矩阵；Deny 仅来自黑名单/沙箱/deny 规则/人在回路 |
 | 规则优先级 | 会话>本地>项目>用户；同层 deny 优先 allow | 用户拍板「越靠近会话越优先」；deny 优先更安全 |
-| 永久放行落点 | 写本地层 `.mewcode/settings.local.yaml`（gitignore） | 用户拍板；不进 git、不影响队友（对齐 Claude Code don't-ask-again） |
+| 永久放行落点 | 写本地层 `.forgecode/settings.local.yaml`（gitignore） | 用户拍板；不进 git、不影响队友（对齐 Claude Code don't-ask-again） |
 | 自动规则泛化 | 不泛化，只生成精确规则 | 自动猜泛化模式有误放行风险；泛化交用户手写 |
 | 规则名 | 友好名 Bash/Read/Write/Edit/Glob/Grep ↔ 内部名映射 | 用户示例即友好名；对齐 Claude Code 习惯，规则更可读 |
 | 参数解析失败归属 | 文件类不可解析→Deny；bash 缺 command→落 Ask；未知工具→Exec/Ask | N7/AC15 安全默认，绝不静默 Allow |

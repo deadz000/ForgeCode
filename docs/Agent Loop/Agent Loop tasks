@@ -6,28 +6,28 @@
 
 | 操作 | 文件 | 职责 |
 |------|------|------|
-| 修改 | `src/mewcode/llm/__init__.py` | 新增 `Usage` 类型；`StreamEvent` 加 `usage`；`Provider.stream` 加 `system_suffix` 形参 |
-| 修改 | `src/mewcode/llm/anthropic_provider.py` | `_effective_system(suffix)`；流结束上抛 usage |
-| 修改 | `src/mewcode/llm/openai_provider.py` | `stream_options={"include_usage": True}`；`_to_openai_messages` 拼 suffix；上抛 usage |
-| 修改 | `src/mewcode/tool/__init__.py` | `Tool` Protocol 加 `read_only` 属性 |
-| 修改 | `src/mewcode/tool/registry.py` | `read_only_definitions`、`is_read_only` |
-| 修改 | `src/mewcode/tool/{read_file,write_file,edit_file,bash,glob,grep}.py` | 各加 `read_only` 属性 |
-| 修改 | `src/mewcode/conversation.py` | `last_role()` |
-| 修改 | `src/mewcode/prompt.py` | `PLAN_MODE_REMINDER`、`EXECUTE_DIRECTIVE`；`SYSTEM_PROMPT` 增循环约定 |
-| 重写 | `src/mewcode/agent/__init__.py` | ReAct 循环、`Mode`、`execute_batched`、`usage/iter/notice` 事件、历史收尾 |
+| 修改 | `src/forgecode/llm/__init__.py` | 新增 `Usage` 类型；`StreamEvent` 加 `usage`；`Provider.stream` 加 `system_suffix` 形参 |
+| 修改 | `src/forgecode/llm/anthropic_provider.py` | `_effective_system(suffix)`；流结束上抛 usage |
+| 修改 | `src/forgecode/llm/openai_provider.py` | `stream_options={"include_usage": True}`；`_to_openai_messages` 拼 suffix；上抛 usage |
+| 修改 | `src/forgecode/tool/__init__.py` | `Tool` Protocol 加 `read_only` 属性 |
+| 修改 | `src/forgecode/tool/registry.py` | `read_only_definitions`、`is_read_only` |
+| 修改 | `src/forgecode/tool/{read_file,write_file,edit_file,bash,glob,grep}.py` | 各加 `read_only` 属性 |
+| 修改 | `src/forgecode/conversation.py` | `last_role()` |
+| 修改 | `src/forgecode/prompt.py` | `PLAN_MODE_REMINDER`、`EXECUTE_DIRECTIVE`；`SYSTEM_PROMPT` 增循环约定 |
+| 重写 | `src/forgecode/agent/__init__.py` | ReAct 循环、`Mode`、`execute_batched`、`usage/iter/notice` 事件、历史收尾 |
 | 重写 | `tests/test_agent.py` | 多轮 fake provider、并发分批、停止条件、Plan 工具集 |
 | 修改 | `tests/test_conversation.py` | `last_role` 断言 |
-| 修改 | `src/mewcode/tui/{app,stream,view}.py` | `mode`、per-turn cancel、Esc/Ctrl+C、`/plan` `/do`、`usage/iter/notice`/多工具、状态栏、动态区 |
+| 修改 | `src/forgecode/tui/{app,stream,view}.py` | `mode`、per-turn cancel、Esc/Ctrl+C、`/plan` `/do`、`usage/iter/notice`/多工具、状态栏、动态区 |
 
-## T1: llm 新增 Usage 类型（纯增量）**文件：** `src/mewcode/llm/__init__.py`
+## T1: llm 新增 Usage 类型（纯增量）**文件：** `src/forgecode/llm/__init__.py`
 **依赖：** 无
 **步骤：**
 1. 新增 `@dataclass class Usage(input_tokens: int = 0, output_tokens: int = 0)`（带中文注释：本轮输入/输出 token 数）。
 2. 给 `StreamEvent` 增字段 `usage: Usage | None = None`（非空即本轮用量），更新 `StreamEvent` 文档注释补「`usage` 非空：本轮 token 用量，`done` 之前一次性发出」。
 
-**验证：** `python -c "from mewcode.llm import Usage, StreamEvent; print(StreamEvent(usage=Usage(1,2)))"` 通过；`ruff check src/mewcode/llm/__init__.py` 无告警（纯增字段，向后兼容，不改 Protocol 签名）。
+**验证：** `python -c "from forgecode.llm import Usage, StreamEvent; print(StreamEvent(usage=Usage(1,2)))"` 通过；`ruff check src/forgecode/llm/__init__.py` 无告警（纯增字段，向后兼容，不改 Protocol 签名）。
 
-## T2: tool 只读分类**文件：** `src/mewcode/tool/__init__.py`、`src/mewcode/tool/registry.py`、`src/mewcode/tool/{read_file,write_file,edit_file,bash,glob,grep}.py`
+## T2: tool 只读分类**文件：** `src/forgecode/tool/__init__.py`、`src/forgecode/tool/registry.py`、`src/forgecode/tool/{read_file,write_file,edit_file,bash,glob,grep}.py`
 **依赖：** 无
 **步骤：**
 1. `__init__.py`：`Tool` Protocol 加 `read_only: bool` 属性（注释：True=只读，可并发执行 & Plan Mode 放行）。
@@ -36,9 +36,9 @@
    - `read_only_definitions() -> list[ToolDefinition]`：仿 `definitions()` 按注册顺序遍历，仅收 `self._tools[name].read_only is True` 的项。
    - `is_read_only(name: str) -> bool`：`t = self.get(name); return t is not None and t.read_only`。
 
-**验证：** `pytest tests/test_tool.py`（若已存在）不回归；`python -c "from mewcode.tool.registry import Registry"` 不报错；`ruff check src/mewcode/tool` 无告警。
+**验证：** `pytest tests/test_tool.py`（若已存在）不回归；`python -c "from forgecode.tool.registry import Registry"` 不报错；`ruff check src/forgecode/tool` 无告警。
 
-## T3: conversation.last_role**文件：** `src/mewcode/conversation.py`、`tests/test_conversation.py`
+## T3: conversation.last_role**文件：** `src/forgecode/conversation.py`、`tests/test_conversation.py`
 **依赖：** 无
 **步骤：**
 1. `conversation.py`：新增 `def last_role(self) -> str`——空历史返回 `""`，否则返回 `self._messages[-1].role`。
@@ -46,7 +46,7 @@
 
 **验证：** `pytest tests/test_conversation.py` 通过。
 
-## T4: prompt 计划态提示与循环约定**文件：** `src/mewcode/prompt.py`
+## T4: prompt 计划态提示与循环约定**文件：** `src/forgecode/prompt.py`
 **依赖：** 无
 **步骤：**
 1. `SYSTEM_PROMPT` 增补一句 Agent 循环约定：持续调用工具推进任务，直到任务完成后再给出最终简洁答复（不要每步都停下来等用户）。
@@ -54,9 +54,9 @@
 3. 新增 `EXECUTE_DIRECTIVE = "请按上面的计划开始执行。"`。
 4. （可选）`READY_HINT` 增提 `/plan`、`/do`。
 
-**验证：** `python -c "from mewcode.prompt import PLAN_MODE_REMINDER, EXECUTE_DIRECTIVE; print(EXECUTE_DIRECTIVE)"` 通过；`pytest` 全量不回归。
+**验证：** `python -c "from forgecode.prompt import PLAN_MODE_REMINDER, EXECUTE_DIRECTIVE; print(EXECUTE_DIRECTIVE)"` 通过；`pytest` 全量不回归。
 
-## T5: llm Provider.stream 加 system_suffix + 用量上抛**文件：** `src/mewcode/llm/__init__.py`、`src/mewcode/llm/anthropic_provider.py`、`src/mewcode/llm/openai_provider.py`、`src/mewcode/agent/__init__.py`（临时补参）
+## T5: llm Provider.stream 加 system_suffix + 用量上抛**文件：** `src/forgecode/llm/__init__.py`、`src/forgecode/llm/anthropic_provider.py`、`src/forgecode/llm/openai_provider.py`、`src/forgecode/agent/__init__.py`（临时补参）
 **依赖：** T1
 **步骤：**
 1. `llm/__init__.py`：`Provider.stream` 签名改为 `def stream(self, msgs, tools, system_suffix: str = "") -> AsyncIterator[StreamEvent]`，更新 Protocol 文档说明 `system_suffix` 语义（非空时拼到内置 `SYSTEM_PROMPT` 之后）。
@@ -67,13 +67,13 @@
    - `stream` 加 `system_suffix`；请求参数加 `stream_options={"include_usage": True}`。
    - `_to_openai_messages(msgs, system_suffix)`：首条 system 消息文本 `SYSTEM_PROMPT`，`system_suffix` 非空时 `+ "\n\n" + system_suffix`（其调用处同步加实参）。
    - 流末尾会出现一个 `chunk.choices == []` 但带 `chunk.usage` 的 chunk：检测到则 `yield StreamEvent(usage=Usage(input_tokens=chunk.usage.prompt_tokens, output_tokens=chunk.usage.completion_tokens))`，跳过该 chunk 的 text 分支。
-4. `src/mewcode/agent/__init__.py`：把现有 `stream_once` 里唯一的 `provider.stream(conv.messages(), defs)` 调用补成 `provider.stream(conv.messages(), defs, "")` 以匹配新签名——本步即让**非测试构建**保持绿（T6 会整体重写 agent）。
+4. `src/forgecode/agent/__init__.py`：把现有 `stream_once` 里唯一的 `provider.stream(conv.messages(), defs)` 调用补成 `provider.stream(conv.messages(), defs, "")` 以匹配新签名——本步即让**非测试构建**保持绿（T6 会整体重写 agent）。
 
 > 说明：`cli.py` 走 `agent.run`、不直接调 `stream`，本步不动它（其 `run` 调用在 T7 随 `mode` / `cancel` 形参一并更新）。`tests/test_agent.py` 的 `FakeProvider.stream` 也实现该 Protocol，本步之后它可能因签名不匹配让用例失败——这是预期的，T6 重写 `test_agent.py` 时一并补 `system_suffix` 形参；因此本步**不要**跑 `pytest tests/test_agent.py`。
 
-**验证：** `python -c "from mewcode.llm.anthropic_provider import AnthropicProvider; from mewcode.llm.openai_provider import OpenAIProvider"` 不报错；`ruff check src/mewcode/llm` 无告警；`python -m mewcode` 发一条纯文本回复正常（用量已随流上抛，旧 agent 暂未消费）。
+**验证：** `python -c "from forgecode.llm.anthropic_provider import AnthropicProvider; from forgecode.llm.openai_provider import OpenAIProvider"` 不报错；`ruff check src/forgecode/llm` 无告警；`python -m forgecode` 发一条纯文本回复正常（用量已随流上抛，旧 agent 暂未消费）。
 
-## T6: agent ReAct 循环重写**文件：** `src/mewcode/agent/__init__.py`、`tests/test_agent.py`
+## T6: agent ReAct 循环重写**文件：** `src/forgecode/agent/__init__.py`、`tests/test_agent.py`
 **依赖：** T1, T2, T3, T4, T5
 **步骤：**
 1. `agent/__init__.py`：
@@ -94,9 +94,9 @@
 
 **验证：** `pytest tests/test_agent.py` 全通过；`pytest -p no:randomly tests/test_agent.py` 顺序稳定；并发分批用例多跑几次（如 `pytest --count=5 tests/test_agent.py::test_concurrent_batch`，需 `pytest-repeat`）无偶发失败（覆盖并发分批，N6）。
 
-## T7: tui 接入 Agent Loop + 收尾 run 调用方**文件：** `src/mewcode/tui/app.py`、`src/mewcode/tui/stream.py`、`src/mewcode/tui/view.py`
+## T7: tui 接入 Agent Loop + 收尾 run 调用方**文件：** `src/forgecode/tui/app.py`、`src/forgecode/tui/stream.py`、`src/forgecode/tui/view.py`
 **依赖：** T4, T6
-**说明：** T6 改了 `Agent.run` 签名（加 `mode` 与 `cancel`），其调用方 `tui/stream.py` 在此步同步更新——本步完成后 `python -m mewcode` 才在**仓库级**重新可启动（T6 后只保证 agent 模块及其测试绿）。
+**说明：** T6 改了 `Agent.run` 签名（加 `mode` 与 `cancel`），其调用方 `tui/stream.py` 在此步同步更新——本步完成后 `python -m forgecode` 才在**仓库级**重新可启动（T6 后只保证 agent 模块及其测试绿）。
 **步骤：**
 1. `app.py`：
    - `MewCodeApp` 新增字段：`mode: agent.Mode = Mode.NORMAL`、`iter: int = 0`、`usage_in: int = 0`、`usage_out: int = 0`、`cur_tools: list[ToolDisplay] = []`（移除单个 `cur_tool`）、`turn_cancel: asyncio.Event | None = None`。
@@ -109,13 +109,13 @@
    - `status_bar`：左侧 provider 名后在 `Mode.PLAN` 时附「PLAN」徽标；右侧 model 名旁附 `↑{in} ↓{out} tok`（紧凑数字，如 `1.2k`）。
    - 流式动态区：`cur_tools` 非空逐行渲染 `● name(args)` Running…；否则「Imagining… (Ns · 第 N 轮)」（`self.iter > 0` 附轮次）。
 
-**验证：** `python -m mewcode`（仓库级可启动）；`ruff format --check src/mewcode/tui`、`ruff check src/mewcode/tui` 无告警。
+**验证：** `python -m forgecode`（仓库级可启动）；`ruff format --check src/forgecode/tui`、`ruff check src/forgecode/tui` 无告警。
 
 ## T8: 全量验证与端到端冒烟**文件：** 无（验证）
 **依赖：** T1–T7
 **步骤：**
-1. `ruff format --check .`、`ruff check .`、`pytest`、（可选）`mypy src/mewcode`。
-2. 端到端（openai 兼容端点，用 `.mewcode/config.yaml`）：
+1. `ruff format --check .`、`ruff check .`、`pytest`、（可选）`mypy src/forgecode`。
+2. 端到端（openai 兼容端点，用 `.forgecode/config.yaml`）：
    - 多轮（AC1）：问「读 `docs/ch03/spec.md`，再据其内容新建 `docs/ch03/summary.txt` 写一句话摘要」→ 观察 `read_file` → `write_file` 跨多轮自动连环、状态栏用量增长、动态区轮次递增、最终答复。
    - 取消（AC10）：发一个会跑多步的任务，中途按 Esc / Ctrl+C → 回空闲态不退出 → 再正常发一条继续对话（验证历史未坏）。
    - 流出错（AC5）：临时改坏 `base_url` 或断网发一条 → 错误提示、程序不退出、改回后继续。

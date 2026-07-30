@@ -6,12 +6,12 @@
 
 在 ch02「provider → conversation → tui」三件套之上，新增两个包并扩展三处：
 
-- **mewcode.tool（新建）**：统一工具抽象 `Tool`、执行结果 `Result`、注册中心 `Registry`、6 个核心工具。零外部依赖，不感知 LLM 协议。
-- **mewcode.agent（新建）**：承载「单轮闭环」编排——请求#1（带工具）→ 收集工具调用 → 注册中心执行 → 结果回灌进 `Conversation` → 请求#2（续答）→ 最终文本 → 停。对外吐出一条 `Event` async generator 供 TUI 渲染。只依赖 `llm`、`tool`、`conversation`，不 import anthropic/openai，保持协议无关。
-- **mewcode.llm（扩展）**：`Message`/`StreamEvent` 增加工具字段；新增协议无关类型 `ToolCall`/`ToolResult`/`ToolDefinition` 与 `ROLE_TOOL` 常量；`Provider.stream` 增加 `tools` 参数；两个适配器注入工具定义、解析流式工具调用、回灌工具结果。
-- **mewcode.conversation（扩展）**：新增「assistant 工具调用回合」与「工具结果回合」的追加方法。
-- **mewcode.prompt（扩展）**：`SYSTEM_PROMPT` 增补 Agent 角色与工具使用约定。
-- **mewcode.tui（扩展）**：`submit` 改走 `Agent.run`；事件消费 task 处理工具事件；渲染 Claude Code 风格工具行与执行指示。
+- **forgecode.tool（新建）**：统一工具抽象 `Tool`、执行结果 `Result`、注册中心 `Registry`、6 个核心工具。零外部依赖，不感知 LLM 协议。
+- **forgecode.agent（新建）**：承载「单轮闭环」编排——请求#1（带工具）→ 收集工具调用 → 注册中心执行 → 结果回灌进 `Conversation` → 请求#2（续答）→ 最终文本 → 停。对外吐出一条 `Event` async generator 供 TUI 渲染。只依赖 `llm`、`tool`、`conversation`，不 import anthropic/openai，保持协议无关。
+- **forgecode.llm（扩展）**：`Message`/`StreamEvent` 增加工具字段；新增协议无关类型 `ToolCall`/`ToolResult`/`ToolDefinition` 与 `ROLE_TOOL` 常量；`Provider.stream` 增加 `tools` 参数；两个适配器注入工具定义、解析流式工具调用、回灌工具结果。
+- **forgecode.conversation（扩展）**：新增「assistant 工具调用回合」与「工具结果回合」的追加方法。
+- **forgecode.prompt（扩展）**：`SYSTEM_PROMPT` 增补 Agent 角色与工具使用约定。
+- **forgecode.tui（扩展）**：`submit` 改走 `Agent.run`；事件消费 task 处理工具事件；渲染 Claude Code 风格工具行与执行指示。
 - **cli.py（扩展）**：构造 `tool.new_default_registry()` 并注入 `MewCodeApp`。
 
 依赖方向（无环）：`tool → llm`；`conversation → llm`；`agent → {llm, tool, conversation}`；`tui → {agent, tool, conversation, llm, prompt}`；`llm → {config, prompt}`。
@@ -172,9 +172,9 @@ class Agent:
         ...
 ```
 
-## 模块设计### `mewcode.tool`**职责：** 提供 6 个工具的统一抽象与执行；集中登记与导出；所有失败包成 `Result(is_error=True)` 而非抛异常（F1/F2/F9/N4）。
+## 模块设计### `forgecode.tool`**职责：** 提供 6 个工具的统一抽象与执行；集中登记与导出；所有失败包成 `Result(is_error=True)` 而非抛异常（F1/F2/F9/N4）。
 **对外接口：** `Tool`、`Result`、`Registry`、`new_default_registry`、`DEFAULT_TIMEOUT`。
-**依赖：** 标准库（`pathlib`、`asyncio`、`re`、`fnmatch`、`json`）、`mewcode.llm`（仅为 `definitions()` 返回 `list[ToolDefinition]`）。
+**依赖：** 标准库（`pathlib`、`asyncio`、`re`、`fnmatch`、`json`）、`forgecode.llm`（仅为 `definitions()` 返回 `list[ToolDefinition]`）。
 **关键实现点：**
 - Schema 手写为 `dict[str, Any]`：OpenAI 直接用整对象；Anthropic 由 llm 适配器取 `["properties"]`/`["required"]`。
 - `read_file` 带行号、行/字节上限、`[truncated]` 标注（N5/AC2）。
@@ -183,9 +183,9 @@ class Agent:
 - `glob` 用 `pathlib.Path(root).glob(pattern)` 或自实现 `**` 段匹配；遍历期间 `await asyncio.sleep(0)` 让出 event loop。`grep` 用 `re` + `Path.rglob` + 异步友好的分批读取。
 - 空 `args`（OpenAI 可能给空串而非 `{}`）归一为 `"{}"` 处理，避免误报参数错误。
 
-### `mewcode.agent`**职责：** 单轮闭环编排（F5/F6），保证 AC9 单轮上限；把 provider 的 `StreamEvent` 与工具执行翻译成统一 `Event` 异步流。
+### `forgecode.agent`**职责：** 单轮闭环编排（F5/F6），保证 AC9 单轮上限；把 provider 的 `StreamEvent` 与工具执行翻译成统一 `Event` 异步流。
 **对外接口：** `Agent`、`Event`、`ToolEvent`、`Phase`。
-**依赖：** `mewcode.llm`、`mewcode.tool`、`mewcode.conversation`、`asyncio`。
+**依赖：** `forgecode.llm`、`forgecode.tool`、`forgecode.conversation`、`asyncio`。
 **run 算法：**
 1. `defs = self._registry.definitions()`。
 2. **请求#1**：`async for ev in self._stream_once(conv, defs):` 转发 `text` 增量给调用方、累积完整 preamble 文本、收集 `tool_calls`；出错则 `yield Event(err=...)` 后结束。
@@ -197,7 +197,7 @@ class Agent:
 8. `conv.add_assistant(final)`，`yield Event(done=True)`。
 - 调用方 `cancel()` 此 task（退出/Ctrl+C）时 `async for` 自然抛 `CancelledError`，沿向上传播终止；工具执行经 `asyncio.wait_for` 受 `DEFAULT_TIMEOUT` 约束（N1）。
 
-### `mewcode.llm`（扩展）**职责：** 协议无关请求/响应抽象 + 两协议工具调用全流程（F3/F4/F6/F7）。
+### `forgecode.llm`（扩展）**职责：** 协议无关请求/响应抽象 + 两协议工具调用全流程（F3/F4/F6/F7）。
 **`anthropic_provider.py` 关键改动：**
 - 请求构造加 `params["tools"] = to_anthropic_tools(tools)`：每项 `{"name": d.name, "description": d.description, "input_schema": d.input_schema}`（SDK 直接接受 `input_schema` 完整对象）。
 - 流循环用 `async with self._client.messages.stream(**params) as stream:`；按 `event.type` 分派：`content_block_delta` + `delta.type == "text_delta"` → `yield StreamEvent(text=delta.text)`；`thinking_delta` / `input_json_delta` 跳过（SDK 内部累加器会保留完整 input JSON）。
@@ -210,7 +210,7 @@ class Agent:
 - 流结束后（`finish_reason == "tool_calls"` 或 buf 非空）按 index 排序组 `ToolCall(id, name, input=arguments_buf)`（空 arguments 归一为 `"{}"`），`yield StreamEvent(tool_calls=calls)`。
 - `to_openai_messages` 扩展：assistant 回合若有 `tool_calls`，发 `{"role": "assistant", "content": preamble or None, "tool_calls": [{"id": c.id, "type": "function", "function": {"name": c.name, "arguments": c.input}} for c in calls]}`；`ROLE_TOOL` 回合每个 `ToolResult` 发一条 `{"role": "tool", "tool_call_id": r.tool_call_id, "content": r.content}`。
 
-### `mewcode.conversation`（扩展）
+### `forgecode.conversation`（扩展）
 
 ```python
 def add_assistant_with_tool_calls(self, text: str, calls: list[ToolCall]) -> None:
@@ -223,7 +223,7 @@ def add_tool_results(self, results: list[ToolResult]) -> None:
 ```
 保留 `add_user`/`add_assistant`/`messages`/`__len__` 不变。
 
-### `mewcode.tui`（扩展）**职责：** 渲染 `agent.Event`（文本/工具行/结果摘要/错误/结束），保持非阻塞（N2）。
+### `forgecode.tui`（扩展）**职责：** 渲染 `agent.Event`（文本/工具行/结果摘要/错误/结束），保持非阻塞（N2）。
 - `MewCodeApp.__init__(self, providers, version, registry)`：存 `self._registry`。
 - 新增 reactive / 成员：`self._cur_tool: ToolDisplay | None`（执行中指示：name/args，非 None 即在 `#streaming` 渲染执行行）。
 - `submit`：`conv.add_user(text)` 后 `self._stream_task = asyncio.create_task(self._consume_agent_events())`，task 内构造 `agent = Agent(self.provider, self._registry)` 后 `async for ev in agent.run(self.conv):` 分派。
@@ -263,9 +263,9 @@ def add_tool_results(self, results: list[ToolResult]) -> None:
 ## 文件组织
 
 ```
-mewcode/
+forgecode/
 ├── pyproject.toml                          — 不变（已含 anthropic/openai/textual/rich/pyyaml）
-├── src/mewcode/
+├── src/forgecode/
 │   ├── cli.py                              — 修改：new_default_registry() 注入 MewCodeApp
 │   ├── llm/
 │   │   ├── __init__.py                     — 修改：新增 ToolCall/ToolResult/ToolDefinition/ROLE_TOOL；扩展 Message/StreamEvent；Provider.stream 加 tools 参数
@@ -287,13 +287,13 @@ mewcode/
     └── test_agent.py                       — 新建：单轮闭环（fake provider）：AC8 链路、AC9 单轮
 ```
 
-注意：`.mewcode/config.yaml` 与 ch02 完全一致——跨章节不变。
+注意：`.forgecode/config.yaml` 与 ch02 完全一致——跨章节不变。
 
 ## 技术决策
 
 | 决策点 | 选择 | 理由 |
 |--------|------|------|
-| 工具调用循环放哪 | 新建 `mewcode.agent` 包，TUI 退化为渲染器 | 循环（请求#1→执行→请求#2）无法塞进 ch02 的单个 `_consume_stream` 协程；独立包可无 UI 单测（AC8/AC9），只依赖 llm+tool+conversation，不泄漏 SDK 类型。命名 `agent` 而非 `runner`：概念即 Agent，本章恰为单轮。 |
+| 工具调用循环放哪 | 新建 `forgecode.agent` 包，TUI 退化为渲染器 | 循环（请求#1→执行→请求#2）无法塞进 ch02 的单个 `_consume_stream` 协程；独立包可无 UI 单测（AC8/AC9），只依赖 llm+tool+conversation，不泄漏 SDK 类型。命名 `agent` 而非 `runner`：概念即 Agent，本章恰为单轮。 |
 | 是否用 SDK 的高级 tool-runner | 不用，坚持手写 streaming + 手动单轮 | anthropic Python SDK 暂无自动 tool runner；openai 的 helper 自动连环到完成，违反 F6/AC9。手写迭代更可控且与 ch02 stable 风格一致。 |
 | 工具定义传入哪一层 | `Provider.stream` 第二参数 `list[ToolDefinition]` | 两 SDK 都把 tools 放 per-request params；续答仍需带；保持 Provider 无状态。 |
 | 工具参数 Schema 生成 | 每工具手写 `dict[str, Any]` | OpenAI `parameters` 与 Anthropic `input_schema` 都直接吃 JSON Schema dict；6 个固定工具手写最直白，描述对模型可读性最关键；不引入 `pydantic` 反射（schema 还要剥 `$defs`/`additionalProperties` 噪音）。 |

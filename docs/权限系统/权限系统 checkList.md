@@ -33,20 +33,20 @@
 - [ ] 不破坏 ch04/ch05：多轮连环、用户取消、流出错恢复、历史一致、缓存命中、规划按轮次注入仍成立（验证：跑既有端到端关键场景；`pytest` 通过）。(AC16/N3)
 
 ## 编译与测试
-- [ ] `python -m mewcode` 能正常启动（在合法配置下进入 TUI）。
+- [ ] `python -m forgecode` 能正常启动（在合法配置下进入 TUI）。
 - [ ] `python -m smoke` 在 `Mode.BYPASS` 下不阻塞、跑完。
 - [ ] `ruff check .` 无告警（含 `permission` 子包）。
 - [ ] `ruff format --check .` 通过（或本地 `ruff format .` 已统一格式）。
 - [ ] `pytest` 通过（config、conversation、tool、agent、prompt、permission、tui 单测）。
 - [ ] `pytest --timeout=30 tests/test_agent.py tests/test_permission_*.py tests/test_tui.py` 无超时（重点守护人在回路阻塞/取消）。(N4)
-- [ ] （可选）`mypy src/mewcode` 通过（含 `permission` 子包）。
+- [ ] （可选）`mypy src/forgecode` 通过（含 `permission` 子包）。
 - [ ] 含密钥的本地配置层已被 gitignore（验证：`git check-ignore` 命中本地层文件）；对话区与任何输出均不出现 api_key（验证：通读输出）。(AC17)
 
 ## 端到端场景（tmux 实跑）
 - [ ] 场景 1（default 写需确认）：default 模式下让模型写一个新文件 → 弹出多行人在回路待批准块（工具名 + 参数 + 触发原因 + 三选菜单）；选「允许本次」→ 文件被写、Loop 继续。(AC10/F8)
 - [ ] 场景 2（拒绝→改路径→完成闭环）：让模型写项目外路径 → 被拒（含「路径在项目目录之外」原因）→ 模型在后续轮**改写到项目内合法路径并成功完成任务**，体现「拒绝回灌让模型调整而非终止」。(AC11/F9)
 - [ ] 场景 3（菜单交互）：待批准块用 ↑↓ 移动高亮 + 回车确认；数字键 1/2/3 亦可直选；默认高亮「允许本次」。(AC10/F8)
-- [ ] 场景 4（永久放行 + 文件产物）：对某调用选「永久」→ (a) 用 cat/grep 确认本地层配置文件出现该精确 allow 条目；(b) 重启 mewcode 后同调用不再弹窗直接执行。(AC10/F8)
+- [ ] 场景 4（永久放行 + 文件产物）：对某调用选「永久」→ (a) 用 cat/grep 确认本地层配置文件出现该精确 allow 条目；(b) 重启 forgecode 后同调用不再弹窗直接执行。(AC10/F8)
 - [ ] 场景 5（acceptEdits）：Shift+Tab 切到 acceptEdits（状态栏左侧显示 `ACCEPT EDITS`）后写/改文件**不弹窗**直接执行，但命令执行仍弹窗。(AC7/F5)
 - [ ] 场景 6（bypass + 黑名单兜底）：Shift+Tab 循环到 bypassPermissions（状态栏左侧显示 `BYPASS`）后普通命令不弹窗；但让模型跑 `rm -rf /` 仍被黑名单拦下、回灌被拒。(AC1/AC7/N1)
 - [ ] 场景 7（沙箱拦截）：让模型读 `/etc/passwd` 或写项目外路径 → 被沙箱拦、回灌「路径在项目目录之外」，模型据此停手或改项目内路径。(AC2/F2)
