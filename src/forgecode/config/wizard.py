@@ -53,9 +53,7 @@ def run_wizard() -> AppConfig:
 
     # 根据协议给出默认 base_url
     default_url = (
-        "https://api.anthropic.com"
-        if protocol.lower() == "anthropic"
-        else "https://api.openai.com/v1"
+        "https://api.anthropic.com" if protocol.lower() == "anthropic" else "https://api.openai.com/v1"
     )
     model = _prompt("模型名称 (model)")
     base_url = _prompt("API 地址 (base_url)", default_url)

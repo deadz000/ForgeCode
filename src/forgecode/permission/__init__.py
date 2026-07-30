@@ -62,4 +62,5 @@ class Outcome(IntEnum):
 
 class ApprovalError(Exception):
     """权限判定异常（非致命，用于降级）。"""
+
     pass

@@ -32,9 +32,7 @@ def test_modules_separated_by_blank_lines():
     """模块间以空行分隔。"""
     sys = build_system_prompt()
     # 至少有 6 处 "\n\n" 分隔（7个模块）
-    assert sys.count("\n\n") >= 6, (
-        f"模块应空行分隔，实际只有 {sys.count(chr(10) + chr(10))} 处双换行"
-    )
+    assert sys.count("\n\n") >= 6, f"模块应空行分隔，实际只有 {sys.count(chr(10) + chr(10))} 处双换行"
 
 
 def test_all_seven_modules_present():
@@ -126,9 +124,7 @@ def test_double_reinforcement_edit():
     """系统提示含「编辑前先读取」类表述。"""
     sys = build_system_prompt()
     # 工具使用模块(50) 应强调编辑前必先读取
-    assert "编辑前必先读取" in sys or "先读后改" in sys or "必须先通过" in sys, (
-        "系统提示应强调编辑前先读取"
-    )
+    assert "编辑前必先读取" in sys or "先读后改" in sys or "必须先通过" in sys, "系统提示应强调编辑前先读取"
 
 
 def test_double_reinforcement_dedicated_tools():
@@ -219,8 +215,7 @@ def test_plug_in_new_module():
     pos_identity = result.find("ForgeCode")
     pos_constraint = result.find("操作边界")
     assert pos_identity < pos_test < pos_constraint, (
-        f"新增模块应排在身份({pos_identity})之后、系统约束({pos_constraint})之前，"
-        f"实际测试模块在 {pos_test}"
+        f"新增模块应排在身份({pos_identity})之后、系统约束({pos_constraint})之前，实际测试模块在 {pos_test}"
     )
 
 

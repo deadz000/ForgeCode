@@ -81,9 +81,9 @@ class ForgeApp:
 
     def run(self) -> None:
         """同步入口。"""
-        asyncio.run(self._run_async())
+        asyncio.run(self.run_async())
 
-    async def _run_async(self) -> None:
+    async def run_async(self) -> None:
         """异步主循环。"""
         self._render_banner()
 
@@ -356,9 +356,7 @@ class ForgeApp:
 
     # ── 人在回路 ──────────────────────────────────
 
-    async def _handle_approval(
-        self, req: ApprovalRequest, timer_task: asyncio.Task
-    ) -> None:
+    async def _handle_approval(self, req: ApprovalRequest, timer_task: asyncio.Task) -> None:
         """展示待批准块，等待用户三选一。"""
         timer_task.cancel()
         self.console.print("\n")
@@ -434,8 +432,32 @@ class ForgeApp:
         self.console.print()
         self.console.print(f"[bold blue]{ASCII_DOG}[/bold blue]")
         self.console.print(f"  [bold]ForgeCode[/bold] [dim]v{VERSION}[/dim]    {cwd}")
+
+        # MCP 连接状态
+        mcp_line = self._mcp_summary()
+        if mcp_line:
+            self.console.print(f"  [dim]{mcp_line}[/dim]")
+
         self.console.print()
         self.console.print("[dim]就绪 - 输入消息开始对话，/help 查看命令[/dim]")
+
+    def _mcp_summary(self) -> str:
+        """统计 registry 中 mcp__ 前缀的工具，返回一行摘要。"""
+        servers: set[str] = set()
+        tool_count = 0
+        for tdef in self.registry.definitions():
+            if tdef.name.startswith("mcp__"):
+                tool_count += 1
+                # mcp__<server>__<tool> → 取 server 名
+                parts = tdef.name.split("__", 2)
+                if len(parts) >= 2:
+                    servers.add(parts[1])
+        if not servers:
+            return ""
+        return (
+            f"Connected to {len(servers)} MCP server(s), "
+            f"{tool_count} tool(s) registered"
+        )
 
     def _status_bar(self) -> list[tuple[str, str]]:
         model_name = self._active_model()

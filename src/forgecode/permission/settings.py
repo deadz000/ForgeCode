@@ -27,6 +27,7 @@ class Settings:
 
 class SettingsError(Exception):
     """配置文件格式错误（非致命，调用方降级）。"""
+
     pass
 
 

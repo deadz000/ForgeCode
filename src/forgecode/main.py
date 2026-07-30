@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import os
 import sys
 
 from forgecode.config.loader import load_config
 from forgecode.conversation.history import Conversation
+from forgecode.mcp import load_config as load_mcp_config
+from forgecode.mcp import new_manager as new_mcp_manager
 from forgecode.permission.engine import new_engine
 from forgecode.providers import create_provider
 from forgecode.tool import new_default_registry
-from forgecode.tui.app import ForgeApp
+from forgecode.tui.app import VERSION, ForgeApp
 
 
 def parse_args() -> argparse.Namespace:
@@ -56,17 +60,37 @@ def cli() -> None:
 
     conversation = Conversation()
     registry = new_default_registry()
-    engine, err = new_engine(".")
-    if err is not None:
-        print(f"权限引擎降级: {err}", file=sys.stderr)
-    app = ForgeApp(
-        config=app_config,
-        provider=provider,
-        conversation=conversation,
-        registry=registry,
-        engine=engine,
-    )
-    app.run()
+
+    # 启动异步主流程（含 MCP 连接 + TUI）
+    try:
+        asyncio.run(_amain(app_config, provider, conversation, registry))
+    except KeyboardInterrupt:
+        pass
+
+
+async def _amain(app_config, provider, conversation, registry) -> None:
+    """异步主流程：MCP 连接 → 注册工具 → 启动 TUI → 关闭 MCP。"""
+    root = os.getcwd()
+
+    # ── MCP 后台连接（不阻塞 TUI）──
+    mcp_cfg = load_mcp_config(root)
+    mcp_mgr = await new_mcp_manager(mcp_cfg, version=VERSION, registry=registry)
+
+    try:
+        engine, err = new_engine(".")
+        if err is not None:
+            print(f"权限引擎降级: {err}", file=sys.stderr)
+
+        app = ForgeApp(
+            config=app_config,
+            provider=provider,
+            conversation=conversation,
+            registry=registry,
+            engine=engine,
+        )
+        await app.run_async()
+    finally:
+        await mcp_mgr.close()
 
 
 if __name__ == "__main__":

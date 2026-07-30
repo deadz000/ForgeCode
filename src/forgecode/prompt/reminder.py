@@ -23,8 +23,7 @@ _PLAN_REMINDER_FULL = (
 )
 
 _PLAN_REMINDER_CONCISE = (
-    "仍在计划模式中——仅可用只读工具（read_file、glob、grep），"
-    "继续调研并完善计划，等待 /do 批准后执行。"
+    "仍在计划模式中——仅可用只读工具（read_file、glob、grep），继续调研并完善计划，等待 /do 批准后执行。"
 )
 
 

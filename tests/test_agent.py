@@ -30,8 +30,10 @@ from forgecode.tool import Registry, Result
 # 提供默认空引擎（使用当前目录，沙箱足够宽松不影响 fake 工具测试）
 def _test_engine() -> Engine:
     import os
+
     e, _ = new_engine(os.getcwd())
     return e
+
 
 # ── Fake Provider ─────────────────────────────────
 
@@ -471,9 +473,7 @@ async def test_cancel_history_consistency():
     assert conv.last_role() == "assistant"
     # 应有 tool_results
     has_tool = any(m.role == "tool" for m in conv.messages)
-    assert has_tool or any(
-        NOTICE_CANCELLED in m.content for m in conv.messages if m.role == "assistant"
-    )
+    assert has_tool or any(NOTICE_CANCELLED in m.content for m in conv.messages if m.role == "assistant")
 
 
 # ── 场景 F：Plan Mode 工具集 (AC13) ──────────────
@@ -681,9 +681,7 @@ async def test_reminder_not_in_history():
 
     # conv 历史中不应出现 reminder 文本
     for msg in conv.messages:
-        assert "<system-reminder>" not in msg.content, (
-            f"持久历史不应含 reminder 标签: {msg.content[:100]}"
-        )
+        assert "<system-reminder>" not in msg.content, f"持久历史不应含 reminder 标签: {msg.content[:100]}"
 
 
 # ── G5：缓存用量透传 ─────────────────────────────

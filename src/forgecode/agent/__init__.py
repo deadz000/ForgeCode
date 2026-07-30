@@ -99,11 +99,7 @@ class Agent:
         env_text = env.render()
         sys = build_system_prompt()
 
-        defs = (
-            self._registry.read_only_definitions()
-            if mode == Mode.PLAN
-            else self._registry.definitions()
-        )
+        defs = self._registry.read_only_definitions() if mode == Mode.PLAN else self._registry.definitions()
         unknown_run = 0
 
         for it in range(1, MAX_ITERATIONS + 1):
@@ -119,9 +115,7 @@ class Agent:
                 reminder = plan_reminder(full)
 
             result: dict[str, Any] = {}
-            async for ev in _stream_once(
-                self._provider, conv, sys, env_text, defs, reminder, cancel, result
-            ):
+            async for ev in _stream_once(self._provider, conv, sys, env_text, defs, reminder, cancel, result):
                 yield ev
 
             ok: bool = result.get("ok", False)
@@ -304,9 +298,7 @@ async def _execute_batched(
             call = calls[i]
             d, reason = engine.check(mode, call, False)
 
-            yield Event(
-                tool=ToolEvent(name=call.name, args=_args_preview(call.input), phase=Phase.START)
-            )
+            yield Event(tool=ToolEvent(name=call.name, args=_args_preview(call.input), phase=Phase.START))
 
             if d == Decision.ALLOW:
                 exec_result = await registry.execute(call.name, call.input, timeout=DEFAULT_TIMEOUT)
@@ -332,6 +324,7 @@ async def _execute_batched(
                     if outcome == Outcome.ALLOW_FOREVER:
                         try:
                             from forgecode.permission.persist import persist_local_allow
+
                             persist_local_allow(engine, call)
                         except Exception:
                             pass
