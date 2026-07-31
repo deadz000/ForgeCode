@@ -14,9 +14,10 @@ from forgecode.conversation.history import Message, ToolResult
 
 
 def _make_session(tmp_path) -> SessionContext:
+    session_dir = str(tmp_path / "sessions" / "test")
     d = str(tmp_path / "sessions" / "test" / "tool-results")
     Path(d).mkdir(parents=True, exist_ok=True)
-    return SessionContext(session_id="test", spill_dir=d)
+    return SessionContext(session_id="test", session_dir=session_dir, spill_dir=d)
 
 
 def _make_tool_msg(results: list[ToolResult]) -> Message:

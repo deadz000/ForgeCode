@@ -6,6 +6,8 @@ Python asyncio 单线程事件循环保证串行执行，以下状态对象内�
 
 from __future__ import annotations
 
+import logging
+import os
 import secrets
 import time
 from collections.abc import Callable
@@ -15,6 +17,8 @@ from pathlib import Path
 
 from forgecode.compact.const import MAX_CONSECUTIVE_AUTO_COMPACT_FAILURES
 
+logger = logging.getLogger(__name__)
+
 # ── SessionContext ─────────────────────────────────
 
 
@@ -23,31 +27,59 @@ class SessionContext:
     """会话生命周期信息。session_id 进程启动时一次性生成。"""
 
     session_id: str
-    spill_dir: str  # 固定指向 .forgecode/sessions/<session_id>/tool-results/
+    session_dir: str  # <workspace>/.forgecode/sessions/<session_id>
+    spill_dir: str  # session_dir + "/tool-results"
 
 
 def _new_session_id() -> str:
-    """生成格式为 <unix_ts>-<short_random> 的会话 id。"""
+    """生成格式为 YYYYMMDD-HHMMSS-xxxx 的会话 id。"""
+    now = datetime.now().strftime("%Y%m%d-%H%M%S")
     try:
-        hex_str = secrets.token_hex(4)
+        suffix = secrets.token_hex(2)  # 4 字符
     except Exception:
-        import logging
         import random
 
-        logging.getLogger(__name__).warning("secrets.token_hex 失败，降级为 random")
-        random.Random(time.time()).randbytes(4)
-        hex_str = (
-            secrets.token_hex(4) if hasattr(secrets, "token_hex") else format(random.getrandbits(32), "08x")
-        )
-    return f"{int(time.time())}-{hex_str}"
+        logger.warning("secrets.token_hex 失败，降级为 random")
+        random.Random(time.time()).randbytes(2)
+        suffix = format(random.getrandbits(16), "04x")
+    return f"{now}-{suffix}"
+
+
+def parse_session_time(session_id: str) -> datetime | None:
+    """从 session ID 前 15 位解析 YYYYMMDD-HHMMSS。
+
+    旧格式（unix_ts-xxx）返回 None，供清理和排序使用。
+    """
+    try:
+        # 新格式: YYYYMMDD-HHMMSS-xxxx (共 21 字符)
+        if len(session_id) < 15:
+            return None
+        ts_part = session_id[:15]
+        return datetime.strptime(ts_part, "%Y%m%d-%H%M%S")
+    except ValueError:
+        return None
 
 
 def new_session_context(workspace: str) -> SessionContext:
     """创建会话上下文并建立落盘目录。"""
     session_id = _new_session_id()
-    spill_dir = str(Path(workspace) / ".forgecode" / "sessions" / session_id / "tool-results")
+    session_dir = str(Path(workspace) / ".forgecode" / "sessions" / session_id)
+    spill_dir = os.path.join(session_dir, "tool-results")
     Path(spill_dir).mkdir(parents=True, exist_ok=True)
-    return SessionContext(session_id=session_id, spill_dir=spill_dir)
+    return SessionContext(session_id=session_id, session_dir=session_dir, spill_dir=spill_dir)
+
+
+def open_session_context(workspace: str, session_id: str) -> SessionContext | None:
+    """打开已有会话目录（恢复场景）。不创建目录，检查存在后填充字段。
+
+    目录不存在返回 None。
+    """
+    session_dir = str(Path(workspace) / ".forgecode" / "sessions" / session_id)
+    if not Path(session_dir).is_dir():
+        return None
+    spill_dir = os.path.join(session_dir, "tool-results")
+    Path(spill_dir).mkdir(parents=True, exist_ok=True)
+    return SessionContext(session_id=session_id, session_dir=session_dir, spill_dir=spill_dir)
 
 
 # ── ContentReplacementState ────────────────────────

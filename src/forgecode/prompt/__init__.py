@@ -18,9 +18,13 @@ def assemble_system(mods: list[Module]) -> str:
     return "\n\n".join(non_empty)
 
 
-def build_system_prompt() -> str:
-    """装配完整系统提示 = fixed_modules() + optional_modules()。"""
-    return assemble_system(fixed_modules() + optional_modules())
+def build_system_prompt(instructions: str = "", memory: str = "") -> str:
+    """装配完整系统提示 = fixed_modules() + optional_modules(instructions, memory)。
+
+    非空 instructions 填入 custom-instructions 模块（priority 80）。
+    非空 memory 填入 long-term-memory 模块（priority 100）。
+    """
+    return assemble_system(fixed_modules() + optional_modules(instructions, memory))
 
 
 # ── 顶层导出 ────────────────────────────────────────

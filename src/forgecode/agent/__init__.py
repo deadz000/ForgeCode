@@ -19,6 +19,7 @@ from forgecode.compact import (
 from forgecode.compact.token import estimate_tokens
 from forgecode.compact.token import usage_anchor as _usage_anchor_fn
 from forgecode.conversation.history import (
+    ROLE_USER,
     Conversation,
     ToolCall,
     ToolDefinition,
@@ -41,6 +42,7 @@ from forgecode.tool import DEFAULT_TIMEOUT, Registry
 MAX_ITERATIONS: int = 25
 MAX_UNKNOWN_RUN: int = 3
 PLAN_REMINDER_INTERVAL: int = 4
+MEMORY_UPDATE_INTERVAL: int = 5  # 每 N 轮自然完成触发记忆更新
 
 NOTICE_MAX_ITER = "（已达最大迭代轮数 25，自动停止；可继续发消息推进。）"
 NOTICE_UNKNOWN_TOOLS = "（连续多轮只请求到未注册的工具，自动停止。）"
@@ -50,6 +52,9 @@ NOTICE_CANCELLED = "（已取消。）"
 MANUAL_SAFETY_MARGIN: int = 3000
 AUTO_SAFETY_MARGIN: int = 13000
 SUMMARY_RESERVE: int = 20000
+
+# 记忆请求关键词
+_MEMORY_SIGNALS = ("记住", "记忆", "别忘", "remember", "memo")
 
 # ── Agent 事件 ────────────────────────────────────
 
@@ -119,11 +124,17 @@ class Agent:
         version: str = "",
         *,
         runtime: Any = None,  # SessionRuntime | None
+        memory_manager: Any = None,  # memory.Manager | None
+        instruction_text: str = "",
+        memory_text: str = "",
     ) -> None:
         self._provider = provider
         self._registry = registry
         self._engine = engine
         self._version = version
+        self._memory_manager = memory_manager
+        self._instruction_text = instruction_text
+        self._memory_text = memory_text
 
         if runtime is None:
             from forgecode.agent.runtime import new_runtime
@@ -154,7 +165,7 @@ class Agent:
     ) -> AsyncIterator[Event]:
         env = gather_environment(self._version, self._provider.config.model)
         env_text = env.render()
-        sys = build_system_prompt()
+        sys = build_system_prompt(self._instruction_text, self._memory_text)
         unknown_run = 0
 
         for it in range(1, MAX_ITERATIONS + 1):
@@ -284,6 +295,8 @@ class Agent:
 
             if not calls:
                 conv.add_assistant(text or "（任务完成）")
+                # ── 记忆更新触发 ──
+                await self._maybe_update_memory(conv)
                 yield Event(done=True)
                 return
 
@@ -319,6 +332,27 @@ class Agent:
         yield Event(notice=NOTICE_MAX_ITER)
         await _ensure_assistant_tail(conv, NOTICE_MAX_ITER)
         yield Event(done=True)
+
+    async def _maybe_update_memory(self, conv: Conversation) -> None:
+        """检查是否需要触发异步记忆更新。"""
+        if self._memory_manager is None:
+            return
+
+        # 递增轮数计数
+        self.runtime.turn_count += 1
+
+        # 提取最近一轮消息（从最后一条 user 到当前 assistant）
+        recent_msgs = _extract_recent_turn(conv)
+
+        # 条件：每 N 轮 或 检测到显式记忆请求关键词
+        should_update = (
+            self.runtime.turn_count % MEMORY_UPDATE_INTERVAL == 0
+            or _has_memory_signal(recent_msgs)
+        )
+
+        if should_update:
+            # 异步执行，不阻塞用户下一次输入
+            asyncio.create_task(self._memory_manager.update_async(recent_msgs))
 
     async def _emergency_compact(self, conv: Conversation, est: int, err: Exception) -> AsyncIterator[Event]:
         """紧急压缩：先 layer1 再 force_compact。"""
@@ -645,3 +679,31 @@ async def _ensure_assistant_tail(conv: Conversation, fallback: str) -> None:
 
 async def _finish_cancelled(conv: Conversation) -> None:
     await _ensure_assistant_tail(conv, NOTICE_CANCELLED)
+
+
+def _extract_recent_turn(conv: Conversation) -> list[Any]:
+    """提取最近一轮对话消息（从最后一条 user 到末尾）。"""
+    msgs = conv.messages
+    if not msgs:
+        return []
+
+    # 从末尾向前找最后一条 user 消息
+    start = len(msgs) - 1
+    while start >= 0 and msgs[start].role != ROLE_USER:
+        start -= 1
+
+    if start < 0:
+        return list(msgs)
+
+    return list(msgs[start:])
+
+
+def _has_memory_signal(msgs: list[Any]) -> bool:
+    """检测消息中是否包含显式记忆请求关键词。"""
+    for m in msgs:
+        text = getattr(m, "content", "") or ""
+        text_lower = text.lower()
+        for kw in _MEMORY_SIGNALS:
+            if kw in text_lower:
+                return True
+    return False

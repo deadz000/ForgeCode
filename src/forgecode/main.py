@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import os
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 from forgecode.agent.runtime import SessionRuntime
@@ -14,10 +15,13 @@ from forgecode.compact.state import new_session_context as _new_session_context
 from forgecode.config.loader import load_config
 from forgecode.config.schema import effective_context_window
 from forgecode.conversation.history import Conversation
+from forgecode.instructions import Loader
 from forgecode.mcp import load_config as load_mcp_config
 from forgecode.mcp import new_manager as new_mcp_manager
+from forgecode.memory import Manager as MemoryManager
 from forgecode.permission.engine import new_engine
 from forgecode.providers import create_provider
+from forgecode.session import Writer, clean_expired
 from forgecode.tool import new_default_registry
 from forgecode.tui.app import VERSION, ForgeApp
 
@@ -86,6 +90,45 @@ def cli() -> None:
 async def _amain(app_config, provider, conversation, registry, runtime) -> None:
     """异步主流程：MCP 连接 → 注册工具 → 启动 TUI → 关闭 MCP。"""
     root = os.getcwd()
+    user_home = os.path.expanduser("~")
+
+    # ── 1. 加载项目指令 ──
+    loader = Loader(project_root=root, user_home=user_home)
+    instruction_text = loader.load()
+
+    # ── 2. 初始化记忆管理器 ──
+    project_mem_dir = os.path.join(root, ".forgecode", "memory")
+    user_mem_dir = os.path.join(user_home, ".forgecode", "memory")
+    mem_mgr = MemoryManager(
+        project_dir=project_mem_dir,
+        user_dir=user_mem_dir,
+        provider=provider,
+        model=provider.config.model,
+    )
+    memory_text = mem_mgr.load_index()
+
+    # ── 3. 创建 Session Writer ──
+    sessions_dir = os.path.join(root, ".forgecode", "sessions")
+    writer = Writer(runtime.session.session_dir)
+
+    # ── 设置 Conversation 回调 ──
+    model_name = provider.config.model
+    _first_call = True
+
+    def _on_append(msg) -> None:
+        nonlocal _first_call
+        writer.append(msg, model=model_name, is_first=_first_call)
+        _first_call = False
+
+    def _on_replace(msgs) -> None:
+        writer.write_compact_marker()
+        writer.append_all(msgs)
+
+    conversation._on_append = _on_append
+    conversation._on_replace = _on_replace
+
+    # ── 4. 后台会话清理 ──
+    asyncio.create_task(asyncio.to_thread(clean_expired, sessions_dir, timedelta(days=30)))
 
     # ── MCP 后台连接（不阻塞 TUI）──
     mcp_cfg = load_mcp_config(root)
@@ -103,10 +146,16 @@ async def _amain(app_config, provider, conversation, registry, runtime) -> None:
             registry=registry,
             engine=engine,
             runtime=runtime,
+            writer=writer,
+            mem_mgr=mem_mgr,
+            instruction_text=instruction_text,
+            memory_text=memory_text,
+            sessions_dir=sessions_dir,
         )
         await app.run_async()
     finally:
         await mcp_mgr.close()
+        writer.close()
 
 
 if __name__ == "__main__":

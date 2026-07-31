@@ -29,6 +29,8 @@ class SessionRuntime:
     usage_anchor: int = 0
     # anchor 当时 conv.length()
     anchor_msg_len: int = 0
+    # 记忆更新：从首次 run 开始累计的自然完成轮数
+    turn_count: int = 0
     # asyncio 单线程，无需显式锁
 
 

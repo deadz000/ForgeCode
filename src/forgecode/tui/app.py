@@ -59,6 +59,12 @@ class ForgeApp:
         registry: Registry,
         engine: Engine,
         runtime: Any = None,  # SessionRuntime
+        *,
+        writer: Any = None,  # session.Writer | None
+        mem_mgr: Any = None,  # memory.Manager | None
+        instruction_text: str = "",
+        memory_text: str = "",
+        sessions_dir: str = "",
     ) -> None:
         self.config = config
         self.provider = provider
@@ -81,6 +87,14 @@ class ForgeApp:
         self._response_elapsed: float = 0
         # 持久 Agent 实例
         self._agent: Agent | None = None
+        # 记忆/会话持久化
+        self._writer: Any = writer
+        self._mem_mgr: Any = mem_mgr
+        self._instruction_text: str = instruction_text
+        self._memory_text: str = memory_text
+        self._sessions_dir: str = sessions_dir
+        # 是否在 Agent 运行中（/resume 互斥）
+        self._agent_running: bool = False
 
     def _get_agent(self) -> Agent:
         """延迟构造 Agent（需要 provider 已选定）。"""
@@ -91,8 +105,18 @@ class ForgeApp:
                 self.engine,
                 VERSION,
                 runtime=self.runtime,
+                memory_manager=self._mem_mgr,
+                instruction_text=self._instruction_text,
+                memory_text=self._memory_text,
             )
         return self._agent
+
+    def refresh_memory_text(self) -> None:
+        """重新加载记忆索引文本（供记忆更新后刷新注入内容）。"""
+        if self._mem_mgr is not None:
+            self._memory_text = self._mem_mgr.load_index()
+        # 重建 Agent 以使用新的 memory_text
+        self._agent = None
 
     # ── 启动 ───────────────────────────────────────
 
@@ -170,7 +194,8 @@ class ForgeApp:
                         "/mode        循环切换权限模式\n"
                         "/plan        进入计划模式（仅只读工具）\n"
                         "/do          批准计划并开始执行\n"
-                        "/compact     手动压缩上下文",
+                        "/compact     手动压缩上下文\n"
+                        "/resume      恢复历史会话",
                     ),
                     title="可用命令",
                     border_style="dim",
@@ -209,6 +234,10 @@ class ForgeApp:
                 from forgecode.config.schema import effective_context_window
 
                 self.runtime.context_window = effective_context_window(new_config)
+            # 通知 memory manager 更新 provider
+            if self._mem_mgr is not None:
+                self._mem_mgr.set_provider(self.provider, new_config.model)
+                self._memory_text = self._mem_mgr.load_index()
             self.console.print(f"[green]已切换到 {new_config.name} ({new_config.model})[/green]")
 
         elif cmd == "/thinking":
@@ -242,6 +271,9 @@ class ForgeApp:
         elif cmd == "/compact":
             await self._handle_compact()
 
+        elif cmd == "/resume":
+            await self._handle_resume()
+
         else:
             self.console.print(f"[yellow]未知命令: {cmd}，输入 /help 查看可用命令[/yellow]")
 
@@ -258,6 +290,67 @@ class ForgeApp:
         except Exception as e:
             self.console.print(f"[red]压缩失败: {e}[/red]")
 
+    async def _handle_resume(self) -> None:
+        """处理 /resume 命令：显示会话列表 + 选择恢复。"""
+        if self._agent_running:
+            self.console.print("[yellow]请等待当前任务完成后再使用 /resume[/yellow]")
+            return
+
+        if not self._sessions_dir:
+            self.console.print("[yellow]会话目录未初始化，无法恢复[/yellow]")
+            return
+
+        from forgecode.session import list_sessions
+        from forgecode.tui.resume import do_resume_session, format_session_item
+
+        sessions = list_sessions(self._sessions_dir)
+
+        if not sessions:
+            self.console.print("[dim]没有可恢复的历史会话[/dim]")
+            return
+
+        # 显示会话列表
+        self.console.print()
+        self.console.print("[bold]📋 历史会话列表[/bold]")
+        self.console.print(f"[dim]共 {len(sessions)} 个会话，输入序号恢复，Esc 取消[/dim]")
+        self.console.print()
+
+        for i, info in enumerate(sessions, 1):
+            self.console.print(format_session_item(info, i))
+
+        self.console.print()
+
+        # 等待用户选择
+        try:
+            choice = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: input("  选择序号（Esc 取消）: ").strip()
+            )
+        except (EOFError, KeyboardInterrupt):
+            self.console.print("[dim]已取消[/dim]")
+            return
+
+        if not choice:
+            self.console.print("[dim]已取消[/dim]")
+            return
+
+        try:
+            idx = int(choice) - 1
+            if idx < 0 or idx >= len(sessions):
+                self.console.print("[red]无效的序号[/red]")
+                return
+        except ValueError:
+            self.console.print("[red]请输入数字序号[/red]")
+            return
+
+        selected = sessions[idx]
+        self.console.print(f"[dim]正在恢复会话 {selected.id}...[/dim]")
+
+        try:
+            msg = await do_resume_session(self, selected)
+            self.console.print(f"[green]{msg}[/green]")
+        except Exception as e:
+            self.console.print(f"[red]恢复失败: {e}[/red]")
+
     # ── 提交消息 ──────────────────────────────────
 
     async def _submit(self, text: str) -> None:
@@ -271,6 +364,7 @@ class ForgeApp:
         self._response_elapsed = 0
         self._turn_cancel = asyncio.Event()
         self._iter = 0
+        self._agent_running = True
 
         self.console.print()
         self.console.print(f"[bold cyan]👤 你:[/bold cyan] {text}")
@@ -379,6 +473,7 @@ class ForgeApp:
             self.console.print(f"[red]✕ 对话出错: {e}[/red]")
 
         timer_task.cancel()
+        self._agent_running = False
         self.console.print()
 
     # ── 响应计时器 ────────────────────────────────
