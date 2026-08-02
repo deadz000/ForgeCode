@@ -195,6 +195,7 @@ class ForgeApp:
                         "/plan        进入计划模式（仅只读工具）\n"
                         "/do          批准计划并开始执行\n"
                         "/compact     手动压缩上下文\n"
+                        "/memory      查看当前记忆索引\n"
                         "/resume      恢复历史会话",
                     ),
                     title="可用命令",
@@ -271,6 +272,9 @@ class ForgeApp:
         elif cmd == "/compact":
             await self._handle_compact()
 
+        elif cmd == "/memory":
+            self._handle_memory()
+
         elif cmd == "/resume":
             await self._handle_resume()
 
@@ -289,6 +293,21 @@ class ForgeApp:
             self.console.print(f"[dim]已压缩，token 从 {before} 降至 {after}[/dim]")
         except Exception as e:
             self.console.print(f"[red]压缩失败: {e}[/red]")
+
+    def _handle_memory(self) -> None:
+        """查看当前记忆索引。"""
+        if self._mem_mgr is None:
+            self.console.print("[dim]记忆系统未初始化[/dim]")
+            return
+
+        text = self._mem_mgr.load_index()
+        if not text.strip():
+            self.console.print("[dim]暂无记忆。对话中提及重要信息时，系统会自动记录。[/dim]")
+            return
+
+        self.console.print()
+        self.console.print(Panel(text.strip(), title="记忆索引", border_style="dim"))
+        self.console.print()
 
     async def _handle_resume(self) -> None:
         """处理 /resume 命令：显示会话列表 + 选择恢复。"""

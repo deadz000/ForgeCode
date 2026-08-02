@@ -262,7 +262,7 @@
 ## T17: 配置示例更新**文件：** `.forgecode/config.yaml.example`
 **依赖：** 无
 **步骤：**
-1. 在配置示例中添加注释，说明 MEWCODE.md 的加载路径和优先级
+1. 在配置示例中添加注释，说明 FORGECODE.md 的加载路径和优先级
 2. 说明 `memory` 和 `sessions` 目录的用途
 
 **验证：** 目视检查示例文件内容完整

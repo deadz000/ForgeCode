@@ -4,7 +4,7 @@
 
 | 新子包 | 职责 |
 |------|------|
-| `forgecode.instructions` | 三层 MEWCODE.md 加载 + @include 展开 |
+| `forgecode.instructions` | 三层 FORGECODE.md 加载 + @include 展开 |
 | `forgecode.session` | JSONL 会话写入、列表扫描、加载恢复、过期清理 |
 | `forgecode.memory` | 笔记 CRUD、索引管理、异步 LLM 更新 |
 
@@ -20,7 +20,7 @@
 ## 核心数据结构### instructions 子包
 
 ```python
-# Loader 负责三层 MEWCODE.md 的加载和 @include 展开。
+# Loader 负责三层 FORGECODE.md 的加载和 @include 展开。
 from dataclasses import dataclass
 
 @dataclass

@@ -12,15 +12,15 @@
 
 ## 项目指令文件
 
-- [ ] 三层加载优先级：在三个路径各放不同内容的 MEWCODE.md，启动进程，检查系统提示 custom-instructions 模块中三份内容按项目根 → .forgecode/ → ~/.forgecode/ 顺序排列（验证：打断点或加日志观察 `build_system_prompt` 输出）
-- [ ] 缺失文件静默：只在项目根放 MEWCODE.md → 加载成功，不报错（验证：启动无错误日志）
-- [ ] @include 正常展开：MEWCODE.md 中写 `@include sub/rules.md`，sub/rules.md 存在且有内容 → 内容替换 @include 行（验证：系统提示中出现 rules.md 的内容）
+- [ ] 三层加载优先级：在三个路径各放不同内容的 FORGECODE.md，启动进程，检查系统提示 custom-instructions 模块中三份内容按项目根 → .forgecode/ → ~/.forgecode/ 顺序排列（验证：打断点或加日志观察 `build_system_prompt` 输出）
+- [ ] 缺失文件静默：只在项目根放 FORGECODE.md → 加载成功，不报错（验证：启动无错误日志）
+- [ ] @include 正常展开：FORGECODE.md 中写 `@include sub/rules.md`，sub/rules.md 存在且有内容 → 内容替换 @include 行（验证：系统提示中出现 rules.md 的内容）
 - [ ] @include 嵌套展开：A include B，B include C → A 的输出中包含 C 的内容
 - [ ] 5 层深度截断：构造 6 层嵌套链 → 第 6 层不展开，输出中出现深度警告注释（验证：`"超过最大嵌套深度" in output`）
 - [ ] 环路检测：A include B、B include A → 第二次引用不展开，出现环路警告（验证：`"检测到环路" in output`）
-- [ ] 路径逃逸：项目级 MEWCODE.md 中 `@include ../../outside.md` → 不加载，出现范围警告（验证：`"路径超出允许范围" in output`）
+- [ ] 路径逃逸：项目级 FORGECODE.md 中 `@include ../../outside.md` → 不加载，出现范围警告（验证：`"路径超出允许范围" in output`）
 - [ ] 二进制文件跳过：@include 指向一个含 `\x00` 的文件 → 跳过，出现警告（验证：测试用例）
-- [ ] 空指令不影响系统提示：三个路径都没有 MEWCODE.md → `build_system_prompt("", memory)` 中 custom-instructions 模块被跳过（验证：系统提示不含空模块）
+- [ ] 空指令不影响系统提示：三个路径都没有 FORGECODE.md → `build_system_prompt("", memory)` 中 custom-instructions 模块被跳过（验证：系统提示不含空模块）
 
 ## 会话存档
 
@@ -77,9 +77,9 @@
 
 ## 端到端场景（tmux 实跑）
 
-- [ ] 场景 1（首次冷启动）：删掉 MEWCODE.md、`.forgecode/memory/`、`~/.forgecode/memory/`，启动 forgecode；banner 正常显示；输入 "你好" → 模型回复正常；`cat .forgecode/sessions/*/conversation.jsonl` 可见至少两行（user + assistant），每行 `jq .` 能解析；第一行含 `"model"` 字段；退出后 session 目录保留不删。(AC7/AC8/AC27)
-- [ ] 场景 2（项目指令生效）：在项目根创建 `MEWCODE.md` 写入 "所有回复必须以「喵~」开头"；启动 forgecode → 输入 "你好" → 模型回复以"喵~"开头（验证指令注入生效）。再在 `~/.forgecode/MEWCODE.md` 写入 "回复使用英文"，重启 → 输入 "你好" → 模型以"喵~"开头但用中文（项目级优先级压过用户级）。(AC1/AC2)
-- [ ] 场景 3（@include 展开）：项目根 `MEWCODE.md` 写 `@include .forgecode/rules/style.md`；创建 `.forgecode/rules/style.md` 写入 "代码块必须带语言标记"；启动 → 输入 "写一个 hello world" → 模型输出的代码块带语言标记。(AC3)
+- [ ] 场景 1（首次冷启动）：删掉 FORGECODE.md、`.forgecode/memory/`、`~/.forgecode/memory/`，启动 forgecode；banner 正常显示；输入 "你好" → 模型回复正常；`cat .forgecode/sessions/*/conversation.jsonl` 可见至少两行（user + assistant），每行 `jq .` 能解析；第一行含 `"model"` 字段；退出后 session 目录保留不删。(AC7/AC8/AC27)
+- [ ] 场景 2（项目指令生效）：在项目根创建 `FORGECODE.md` 写入 "所有回复必须以「喵~」开头"；启动 forgecode → 输入 "你好" → 模型回复以"喵~"开头（验证指令注入生效）。再在 `~/.forgecode/FORGECODE.md` 写入 "回复使用英文"，重启 → 输入 "你好" → 模型以"喵~"开头但用中文（项目级优先级压过用户级）。(AC1/AC2)
+- [ ] 场景 3（@include 展开）：项目根 `FORGECODE.md` 写 `@include .forgecode/rules/style.md`；创建 `.forgecode/rules/style.md` 写入 "代码块必须带语言标记"；启动 → 输入 "写一个 hello world" → 模型输出的代码块带语言标记。(AC3)
 - [ ] 场景 4（会话存档 + 工具记录）：启动 → 输入 "读取 pyproject.toml" → 模型调 read_file → 回复内容；`cat .forgecode/sessions/*/conversation.jsonl` 至少 4 行（user → assistant+tool_calls → tool_results → assistant）；`grep tool_calls` 和 `grep tool_results` 各至少一条命中。(AC8/AC9)
 - [ ] 场景 5（/resume 完整流程）：启动 session A → 输入 "记住：我在写一个电商系统" → 模型回复 → `/exit` 退出；重新启动（新 session B）→ 输入 `/resume` → 列表中出现 session A（标题含"记住"或"电商"）→ 上下键选中 → Enter → TUI 显示"已恢复会话"系统消息 → 输入 "上次说到哪了" → 模型能引用之前的对话内容；`wc -l .forgecode/sessions/<A_id>/conversation.jsonl` 行数比恢复前多（恢复后新消息追加到旧 JSONL）。(AC11/AC12/AC13/AC18)
 - [ ] 场景 6（/resume 搜索过滤）：存在多个历史会话 → `/resume` → 输入搜索关键词（如某个会话标题中的词）→ 列表过滤到匹配项；按 Esc → 返回空闲态，当前会话不受影响。(AC13)

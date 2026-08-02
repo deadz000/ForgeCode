@@ -1,9 +1,9 @@
-"""项目指令加载器：三层 MEWCODE.md 扫描 + @include 展开。
+"""项目指令加载器：三层 FORGECODE.md 扫描 + @include 展开。
 
 扫描顺序（高优先级在前）：
-1. <project_root>/MEWCODE.md（项目级）
-2. <project_root>/.forgecode/MEWCODE.md（项目配置级）
-3. ~/.forgecode/MEWCODE.md（用户级）
+1. <project_root>/FORGECODE.md（项目级）
+2. <project_root>/.forgecode/FORGECODE.md（项目配置级）
+3. ~/.forgecode/FORGECODE.md（用户级）
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ _BINARY_THRESHOLD = 512
 
 @dataclass
 class Loader:
-    """三层 MEWCODE.md 加载器。
+    """三层 FORGECODE.md 加载器。
 
     project_root: 项目根目录绝对路径。
     user_home:   用户 home 目录，缺省 os.path.expanduser("~")。
@@ -49,22 +49,22 @@ class Loader:
         """
         parts: list[str] = []
 
-        # ① 项目根 MEWCODE.md（最高优先级）
+        # ① 项目根 FORGECODE.md（最高优先级）
         project_root = str(Path(self.project_root).resolve())
-        path1 = os.path.join(project_root, "MEWCODE.md")
+        path1 = os.path.join(project_root, "FORGECODE.md")
         text1 = self._load_file(path1, boundary=project_root, depth=1, visited=set())
         if text1:
             parts.append(text1)
 
-        # ② 项目配置级 .forgecode/MEWCODE.md
-        path2 = os.path.join(project_root, ".forgecode", "MEWCODE.md")
+        # ② 项目配置级 .forgecode/FORGECODE.md
+        path2 = os.path.join(project_root, ".forgecode", "FORGECODE.md")
         text2 = self._load_file(path2, boundary=project_root, depth=1, visited=set())
         if text2:
             parts.append(text2)
 
-        # ③ 用户级 ~/.forgecode/MEWCODE.md（最低优先级）
+        # ③ 用户级 ~/.forgecode/FORGECODE.md（最低优先级）
         user_forge = os.path.join(self.user_home, ".forgecode")
-        path3 = os.path.join(user_forge, "MEWCODE.md")
+        path3 = os.path.join(user_forge, "FORGECODE.md")
         text3 = self._load_file(path3, boundary=user_forge, depth=1, visited=set())
         if text3:
             parts.append(text3)

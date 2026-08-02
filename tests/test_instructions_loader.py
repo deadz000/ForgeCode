@@ -6,17 +6,17 @@ from forgecode.instructions import Loader
 
 
 def test_load_all_empty(tmp_path):
-    """三个路径都没有 MEWCODE.md → 返回空字符串。"""
+    """三个路径都没有 FORGECODE.md → 返回空字符串。"""
     loader = Loader(project_root=str(tmp_path), user_home=str(tmp_path))
     result = loader.load()
     assert result == ""
 
 
 def test_load_project_root_only(tmp_path):
-    """只在项目根有 MEWCODE.md → 只包含项目根的内容。"""
+    """只在项目根有 FORGECODE.md → 只包含项目根的内容。"""
     root = tmp_path / "proj"
     root.mkdir()
-    (root / "MEWCODE.md").write_text("项目规范", encoding="utf-8")
+    (root / "FORGECODE.md").write_text("项目规范", encoding="utf-8")
 
     loader = Loader(project_root=str(root), user_home=str(tmp_path))
     result = loader.load()
@@ -27,14 +27,14 @@ def test_load_three_layers_order(tmp_path):
     """三层加载：高优先级在前。"""
     root = tmp_path / "proj"
     root.mkdir()
-    (root / "MEWCODE.md").write_text("ROOT", encoding="utf-8")
+    (root / "FORGECODE.md").write_text("ROOT", encoding="utf-8")
     (root / ".forgecode").mkdir()
-    (root / ".forgecode" / "MEWCODE.md").write_text("PROJECT", encoding="utf-8")
+    (root / ".forgecode" / "FORGECODE.md").write_text("PROJECT", encoding="utf-8")
 
     user_home = tmp_path / "home"
     user_home.mkdir()
     (user_home / ".forgecode").mkdir()
-    (user_home / ".forgecode" / "MEWCODE.md").write_text("USER", encoding="utf-8")
+    (user_home / ".forgecode" / "FORGECODE.md").write_text("USER", encoding="utf-8")
 
     loader = Loader(project_root=str(root), user_home=str(user_home))
     result = loader.load()
@@ -52,7 +52,7 @@ def test_include_basic(tmp_path):
     root.mkdir()
     (root / "rules").mkdir()
     (root / "rules" / "style.md").write_text("代码风格：缩进用 4 空格", encoding="utf-8")
-    (root / "MEWCODE.md").write_text("项目规范\n@include rules/style.md", encoding="utf-8")
+    (root / "FORGECODE.md").write_text("项目规范\n@include rules/style.md", encoding="utf-8")
 
     loader = Loader(project_root=str(root))
     result = loader.load()
@@ -117,13 +117,13 @@ def test_include_cycle_detection(tmp_path):
 
 
 def test_include_path_escape(tmp_path):
-    """项目级 MEWCODE.md 中 @include 跳出项目根 → 不加载，出现警告。"""
+    """项目级 FORGECODE.md 中 @include 跳出项目根 → 不加载，出现警告。"""
     root = tmp_path / "proj"
     root.mkdir()
     # 尝试 include 上级目录的文件
     outside = tmp_path / "outside.md"
     outside.write_text("SECRET", encoding="utf-8")
-    (root / "MEWCODE.md").write_text("项目\n@include ../outside.md", encoding="utf-8")
+    (root / "FORGECODE.md").write_text("项目\n@include ../outside.md", encoding="utf-8")
 
     loader = Loader(project_root=str(root))
     result = loader.load()
@@ -135,7 +135,7 @@ def test_include_missing_file(tmp_path):
     """@include 指向不存在的文件 → 静默跳过。"""
     root = tmp_path / "proj"
     root.mkdir()
-    (root / "MEWCODE.md").write_text("项目\n@include nonexistent.md", encoding="utf-8")
+    (root / "FORGECODE.md").write_text("项目\n@include nonexistent.md", encoding="utf-8")
 
     loader = Loader(project_root=str(root))
     result = loader.load()
@@ -148,7 +148,7 @@ def test_include_binary_file(tmp_path):
     root = tmp_path / "proj"
     root.mkdir()
     (root / "binary.bin").write_bytes(b"\x00\x01\x02\x03")
-    (root / "MEWCODE.md").write_text("项目\n@include binary.bin", encoding="utf-8")
+    (root / "FORGECODE.md").write_text("项目\n@include binary.bin", encoding="utf-8")
 
     loader = Loader(project_root=str(root))
     result = loader.load()
