@@ -247,3 +247,60 @@ def test_note_types():
     assert NoteType.CORRECTION_FEEDBACK == "correction_feedback"
     assert NoteType.PROJECT_KNOWLEDGE == "project_knowledge"
     assert NoteType.REFERENCE_MATERIAL == "reference_material"
+
+
+# ── list_files 测试 ──
+
+
+def test_manager_list_files_empty(tmp_path):
+    """空两级目录 → list_files 返回 ([], [])。"""
+    from forgecode.memory.manager import Manager
+
+    mgr = Manager(project_dir=str(tmp_path / "proj"), user_dir=str(tmp_path / "user"))
+    project, user = mgr.list_files()
+    assert project == []
+    assert user == []
+
+
+def test_manager_list_files_only_mem_md(tmp_path):
+    """仅含 MEMORY.md → list_files 返回单文件。"""
+    from forgecode.memory.manager import Manager
+
+    proj_dir = tmp_path / "proj"
+    proj_dir.mkdir()
+    (proj_dir / "MEMORY.md").write_text("")
+
+    mgr = Manager(project_dir=str(proj_dir), user_dir=str(tmp_path / "user"))
+    project, user = mgr.list_files()
+    assert project == ["MEMORY.md"]
+    assert user == []
+
+
+def test_manager_list_files_multiple_md(tmp_path):
+    """含多个 .md → list_files 返回全部且已排序。"""
+    from forgecode.memory.manager import Manager
+
+    proj_dir = tmp_path / "proj"
+    proj_dir.mkdir()
+    (proj_dir / "Z.md").write_text("")
+    (proj_dir / "A.md").write_text("")
+    (proj_dir / "MEMORY.md").write_text("")
+
+    mgr = Manager(project_dir=str(proj_dir), user_dir=str(tmp_path / "user"))
+    project, _ = mgr.list_files()
+    assert project == ["A.md", "MEMORY.md", "Z.md"]
+
+
+def test_manager_list_files_mixed_extensions(tmp_path):
+    """.md 与其他扩展名混合 → 仅返回 .md 文件。"""
+    from forgecode.memory.manager import Manager
+
+    proj_dir = tmp_path / "proj"
+    proj_dir.mkdir()
+    (proj_dir / "note.md").write_text("")
+    (proj_dir / "data.txt").write_text("")
+    (proj_dir / "script.py").write_text("")
+
+    mgr = Manager(project_dir=str(proj_dir), user_dir=str(tmp_path / "user"))
+    project, _ = mgr.list_files()
+    assert project == ["note.md"]

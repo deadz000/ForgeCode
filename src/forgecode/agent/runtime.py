@@ -42,3 +42,21 @@ def new_runtime(workspace: str = ".") -> SessionRuntime:
         auto_tracking=CompactCircuitBreaker(),
         session=new_session_context(workspace),
     )
+
+
+def reset_for_new_session(self: SessionRuntime, ses_ctx: SessionContext) -> None:
+    """原子重置 compact 子状态与计数器，将 session 指向新上下文。
+
+    注意：context_window 保留不变；writer 与 conv 重建由调用方负责。
+    """
+    self.replacement = ContentReplacementState()
+    self.recovery = RecoveryState()
+    self.auto_tracking = CompactCircuitBreaker()
+    self.session = ses_ctx
+    self.usage_anchor = 0
+    self.anchor_msg_len = 0
+    self.turn_count = 0
+
+
+# 将函数绑定为 SessionRuntime 的方法
+SessionRuntime.reset_for_new_session = reset_for_new_session  # type: ignore[attr-defined]

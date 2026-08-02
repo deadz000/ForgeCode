@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from typing import Any
 
 from forgecode.memory.prompts import MEMORY_UPDATE_SYSTEM_PROMPT
@@ -58,6 +59,21 @@ class Manager:
             merged = truncated.decode("utf-8", errors="replace") + "\n(index truncated)"
 
         return merged
+
+    def list_files(self) -> tuple[list[str], list[str]]:
+        """返回 (项目层文件名列表, 用户层文件名列表)，均按字典序排序。"""
+
+        def _list(store: Store) -> list[str]:
+            try:
+                entries = os.listdir(store._dir)
+            except FileNotFoundError:
+                return []
+            except OSError:
+                logger.warning("列出记忆目录失败: %s", store._dir)
+                return []
+            return sorted(f for f in entries if f.endswith(".md"))
+
+        return (_list(self._project_store), _list(self._user_store))
 
     def set_provider(self, provider: BaseProvider, model: str) -> None:
         """延迟设置 provider（启动时 provider 未选定）。"""

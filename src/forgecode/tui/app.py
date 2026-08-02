@@ -10,6 +10,8 @@ from typing import Any
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.shortcuts import prompt as pt_prompt
 from prompt_toolkit.styles import Style
 from rich.console import Console
 from rich.markdown import Markdown
@@ -18,6 +20,11 @@ from rich.rule import Rule
 from rich.text import Text
 
 from forgecode.agent import Agent, ApprovalRequest, CompactEvent, CompactPhase, Phase, ToolEvent
+from forgecode.command import Kind as CmdKind
+from forgecode.command import Registry as CmdRegistry
+from forgecode.command import parse as parse_command
+from forgecode.command import register_builtins
+from forgecode.command.command import Command as CmdCommand
 from forgecode.config.schema import AppConfig
 from forgecode.conversation.history import Conversation
 from forgecode.permission import Mode, Outcome
@@ -25,6 +32,7 @@ from forgecode.permission.engine import Engine
 from forgecode.prompt import EXECUTE_DIRECTIVE
 from forgecode.providers import BaseProvider, create_provider
 from forgecode.tool import Registry
+from forgecode.tui.complete import SlashCompleter
 
 # ── ASCII 小狗 ────────────────────────────────────
 
@@ -95,6 +103,55 @@ class ForgeApp:
         self._sessions_dir: str = sessions_dir
         # 是否在 Agent 运行中（/resume 互斥）
         self._agent_running: bool = False
+        # 命令系统
+        self.cmd_registry: CmdRegistry | None = None
+        self._slash_completer: SlashCompleter | None = None
+        self._current_slash_args: str = ""
+
+        # 构造命令注册中心
+        reg = CmdRegistry()
+        register_builtins(reg)
+        # 注册 4 条隐藏命令（全部走注册中心，无遗留分支）
+        reg.register(
+            CmdCommand(
+                name="providers",
+                description="列出已配置的供应商",
+                kind=CmdKind.LOCAL,
+                handler=self._legacy_providers_handler,
+                hidden=True,
+            )
+        )
+        reg.register(
+            CmdCommand(
+                name="mode",
+                description="循环切换权限模式",
+                kind=CmdKind.LOCAL,
+                handler=self._legacy_mode_handler,
+                hidden=True,
+            )
+        )
+        reg.register(
+            CmdCommand(
+                name="switch",
+                description="切换到指定供应商",
+                kind=CmdKind.LOCAL,
+                handler=self._handle_switch,
+                hidden=True,
+                accepts_args=True,
+            )
+        )
+        reg.register(
+            CmdCommand(
+                name="thinking",
+                description="切换思考展示",
+                kind=CmdKind.LOCAL,
+                handler=self._handle_thinking,
+                hidden=True,
+                accepts_args=True,
+            )
+        )
+        self.cmd_registry = reg
+        self._slash_completer = SlashCompleter(reg)
 
     def _get_agent(self) -> Agent:
         """延迟构造 Agent（需要 provider 已选定）。"""
@@ -118,6 +175,144 @@ class ForgeApp:
         # 重建 Agent 以使用新的 memory_text
         self._agent = None
 
+    # ── UI Protocol 实现 ────────────────────────────
+
+    def println(self, msg: str) -> None:
+        """向用户输出普通消息。"""
+        self.console.print(msg)
+
+    def error(self, msg: str) -> None:
+        """向用户输出错误消息。"""
+        self.console.print(f"[red]{msg}[/red]")
+
+    def get_mode(self) -> Mode:
+        """返回当前权限模式。"""
+        return self.mode
+
+    def set_mode(self, m: Mode) -> None:
+        """设置权限模式。"""
+        self.mode = m
+
+    def inject_and_send(self, display_label: str, preset_prompt: str) -> None:
+        """向对话注入一条 user 消息并立即触发 Agent 回合。"""
+        self.conversation.add_user(preset_prompt)
+        self.console.print(f"[dim]{display_label}[/dim]")
+        asyncio.create_task(self._submit(preset_prompt))
+
+    def usage_in(self) -> int:
+        return self._total_input_tokens
+
+    def usage_out(self) -> int:
+        return self._total_output_tokens
+
+    def model_name(self) -> str:
+        return self._active_model()
+
+    def cwd(self) -> str:
+        return os.getcwd()
+
+    def tool_count(self) -> int:
+        return self.registry.count()
+
+    def memory_files(self) -> list[str]:
+        if self._mem_mgr is None:
+            return []
+        project, user = self._mem_mgr.list_files()
+        return project + user
+
+    def session_path(self) -> str:
+        return self._writer.path if self._writer else ""
+
+    def session_id(self) -> str:
+        if self.runtime and self.runtime.session:
+            return self.runtime.session.session_id
+        return ""
+
+    def idle(self) -> bool:
+        return not self._agent_running
+
+    def quit(self) -> None:
+        self._exit_flag = True
+
+    def force_compact(self) -> None:
+        asyncio.create_task(self._handle_compact())
+
+    async def open_resume_menu(self) -> None:
+        await self._handle_resume()
+
+    def clear_and_new_session(self) -> None:
+        """关闭当前会话，创建新 SessionContext/Writer/Conversation 并重置状态。"""
+        # 关闭旧 writer
+        if self._writer is not None:
+            try:
+                self._writer.close()
+            except Exception:
+                pass
+
+        # 创建新会话上下文
+        from forgecode.compact.state import new_session_context
+
+        workspace = os.getcwd()
+        try:
+            new_ses_ctx = new_session_context(workspace)
+        except Exception as e:
+            self.error(f"无法创建新会话: {e}")
+            return
+
+        # 打开新 writer
+        from forgecode.session.writer import Writer
+
+        try:
+            new_writer = Writer(new_ses_ctx.session_dir)
+        except OSError as e:
+            self.error(f"无法创建新会话文件: {e}")
+            return
+
+        self._writer = new_writer
+
+        # 重建 conversation 回调（指向新 writer）
+        model_name = self._active_model()
+        _first_call = [True]
+
+        def _on_append(msg) -> None:
+            new_writer.append(msg, model=model_name, is_first=_first_call[0])
+            _first_call[0] = False
+
+        def _on_replace(msgs) -> None:
+            new_writer.write_compact_marker()
+            new_writer.append_all(msgs)
+
+        self.conversation._on_append = _on_append
+        self.conversation._on_replace = _on_replace
+        self.conversation.clear()
+
+        # 重置 runtime compact 子状态
+        if self.runtime is not None:
+            self.runtime.reset_for_new_session(new_ses_ctx)
+
+        # 重置计数
+        self._total_input_tokens = 0
+        self._total_output_tokens = 0
+        self._iter = 0
+        self._response_elapsed = 0
+
+    # ── 遗留命令 handler（hidden=True，仅供 cmd_registry 引用）──
+
+    async def _legacy_providers_handler(self, _ui) -> None:
+        """列出已配置的供应商。"""
+        lines: list[str] = []
+        for p in self.config.providers:
+            marker = " *" if p.name == self.config.active_provider_name else "  "
+            lines.append(f"{marker} {p.name}  ({p.protocol}/{p.model})")
+        self.console.print()
+        self.console.print(Panel("\n".join(lines), title="供应商列表", border_style="dim"))
+        self.console.print()
+
+    async def _legacy_mode_handler(self, _ui) -> None:
+        """循环切换权限模式。"""
+        self.mode = Mode((int(self.mode) + 1) % 4)
+        self.console.print(f"[dim]已切换到 {self.mode.label()} 模式[/dim]")
+
     # ── 启动 ───────────────────────────────────────
 
     def run(self) -> None:
@@ -129,7 +324,12 @@ class ForgeApp:
         self._render_banner()
 
         history = InMemoryHistory()
-        session: PromptSession[str] = PromptSession(history=history, style=PROMPT_STYLE)
+        session: PromptSession[str] = PromptSession(
+            history=history,
+            style=PROMPT_STYLE,
+            completer=self._slash_completer,
+            complete_while_typing=True,
+        )
 
         while not self._exit_flag:
             self.console.print(Rule(style="dim"))
@@ -159,127 +359,100 @@ class ForgeApp:
             if not user_input:
                 continue
 
-            if user_input.startswith("/"):
-                await self._dispatch_command(user_input)
-            else:
-                try:
-                    await self._submit(user_input)
-                except asyncio.CancelledError:
+            if await self.dispatch_slash(user_input):
+                continue
+            try:
+                await self._submit(user_input)
+            except asyncio.CancelledError:
                     self.console.print()
                     self.console.print("[dim]已中断[/dim]")
 
     # ── 命令分发 ──────────────────────────────────
 
-    async def _dispatch_command(self, text: str) -> None:
-        """统一命令分发（不写入 conversation，不发给 LLM）。"""
-        parts = text.split(maxsplit=1)
-        cmd = parts[0].lower()
-        args = parts[1] if len(parts) > 1 else ""
+    async def dispatch_slash(self, text: str) -> bool:
+        """基于注册中心的命令分发。返回 True 表示已处理为命令。"""
+        name, is_slash = parse_command(text)
+        if not is_slash:
+            return False
 
-        if cmd in ("/exit", "/quit"):
-            self.console.print("[dim]再见！[/dim]")
-            self._exit_flag = True
+        # 空 name（纯 "/" 或无效输入）→ 未命中提示
+        if not name:
+            self.console.print("[yellow]未知命令。输入 /help 查看可用命令。[/yellow]")
+            return True
 
-        elif cmd == "/help":
-            self.console.print()
-            self.console.print(
-                Panel(
-                    Text(
-                        "/help        显示帮助信息\n"
-                        "/clear       清空对话历史\n"
-                        "/exit, /quit 退出程序\n"
-                        "/providers   列出已配置的供应商\n"
-                        "/switch <n>  切换到指定供应商\n"
-                        "/thinking on|off  切换思考展示\n"
-                        "/mode        循环切换权限模式\n"
-                        "/plan        进入计划模式（仅只读工具）\n"
-                        "/do          批准计划并开始执行\n"
-                        "/compact     手动压缩上下文\n"
-                        "/memory      查看当前记忆索引\n"
-                        "/resume      恢复历史会话",
-                    ),
-                    title="可用命令",
-                    border_style="dim",
-                )
-            )
-            self.console.print()
+        assert self.cmd_registry is not None
+        cmd = self.cmd_registry.lookup(name)
+        if cmd is None:
+            self.console.print(f"[yellow]未知命令: /{name}。输入 /help 查看可用命令。[/yellow]")
+            return True
 
-        elif cmd == "/clear":
-            self.conversation.clear()
-            self.console.print("[dim]对话历史已清空。[/dim]")
+        # 提取尾随 args
+        stripped = text.strip()
+        parts = stripped.split(maxsplit=1)
+        raw_args = parts[1].strip() if len(parts) > 1 else ""
 
-        elif cmd == "/providers":
-            self.console.print()
-            lines: list[str] = []
-            for p in self.config.providers:
-                marker = " *" if p.name == self.config.active_provider_name else "  "
-                lines.append(f"{marker} {p.name}  ({p.protocol}/{p.model})")
-            self.console.print(Panel("\n".join(lines), title="供应商列表", border_style="dim"))
-            self.console.print()
+        # 不接受参数的命令收到参数 → 未命中
+        if raw_args and not cmd.accepts_args:
+            self.console.print(f"[yellow]未知命令: /{name}。输入 /help 查看可用命令。[/yellow]")
+            return True
 
-        elif cmd == "/switch":
-            if not args:
-                self.console.print("[yellow]用法: /switch <名称>[/yellow]")
-                return
-            name = args.strip()
-            matching = [p for p in self.config.providers if p.name == name]
-            if not matching:
-                self.console.print(f"[red]未找到供应商 '{name}'[/red]")
-                return
-            new_config = matching[0]
-            self.provider = create_provider(new_config)
-            self.config.active_provider_name = new_config.name
-            # 切换 provider 后重建 Agent
-            self._agent = None
-            if self.runtime is not None:
-                from forgecode.config.schema import effective_context_window
+        # Idle 守卫：Kind.UI 和 Kind.PROMPT 命令仅在空闲时可执行
+        if cmd.kind in (CmdKind.UI, CmdKind.PROMPT) and not self.idle():
+            self.console.print("[yellow]请等待当前任务完成后再使用此命令。[/yellow]")
+            return True
 
-                self.runtime.context_window = effective_context_window(new_config)
-            # 通知 memory manager 更新 provider
-            if self._mem_mgr is not None:
-                self._mem_mgr.set_provider(self.provider, new_config.model)
-                self._memory_text = self._mem_mgr.load_index()
-            self.console.print(f"[green]已切换到 {new_config.name} ({new_config.model})[/green]")
+        # 注入 args 供 handler 读取
+        if cmd.accepts_args:
+            self._current_slash_args = raw_args
 
-        elif cmd == "/thinking":
-            arg = args.strip().lower()
-            if arg == "on":
-                self._show_thinking = True
-                self.console.print("[green]思考展示已开启[/green]")
-            elif arg == "off":
-                self._show_thinking = False
-                self.console.print("[yellow]思考展示已关闭[/yellow]")
-            else:
-                self.console.print("[yellow]用法: /thinking on|off[/yellow]")
+        try:
+            await cmd.handler(self)
+        except Exception as exc:
+            self.console.print(f"[red]命令执行失败: {exc}[/red]")
+        finally:
+            if cmd.accepts_args:
+                self._current_slash_args = ""
 
-        elif cmd == "/plan":
-            self.mode = Mode.PLAN
-            self.console.print(
-                "[dim]已进入计划模式（仅只读工具），输入需求后产出计划。用 /do 批准执行。[/dim]"
-            )
+        return True
 
-        elif cmd == "/mode":
-            # 循环切换权限模式
-            self.mode = Mode((int(self.mode) + 1) % 4)
-            self.console.print(f"[dim]已切换到 {self.mode.label()} 模式[/dim]")
+    # ── 带参数命令的 handler ──────────────────────────
 
-        elif cmd == "/do":
-            self.mode = Mode.DEFAULT
-            self.conversation.add_user(EXECUTE_DIRECTIVE)
-            self.console.print("[dim]已切回执行模式，正在按计划执行...[/dim]")
-            asyncio.create_task(self._submit(EXECUTE_DIRECTIVE))
+    async def _handle_switch(self, _ui) -> None:
+        """切换到指定供应商（/switch <name>）。"""
+        args = getattr(self, "_current_slash_args", "")
+        if not args:
+            self.console.print("[yellow]用法: /switch <名称>[/yellow]")
+            return
+        name = args.strip()
+        matching = [p for p in self.config.providers if p.name == name]
+        if not matching:
+            self.console.print(f"[red]未找到供应商 '{name}'[/red]")
+            return
+        new_config = matching[0]
+        self.provider = create_provider(new_config)
+        self.config.active_provider_name = new_config.name
+        self._agent = None
+        if self.runtime is not None:
+            from forgecode.config.schema import effective_context_window
 
-        elif cmd == "/compact":
-            await self._handle_compact()
+            self.runtime.context_window = effective_context_window(new_config)
+        if self._mem_mgr is not None:
+            self._mem_mgr.set_provider(self.provider, new_config.model)
+            self._memory_text = self._mem_mgr.load_index()
+        self.console.print(f"[green]已切换到 {new_config.name} ({new_config.model})[/green]")
 
-        elif cmd == "/memory":
-            self._handle_memory()
-
-        elif cmd == "/resume":
-            await self._handle_resume()
-
+    async def _handle_thinking(self, _ui) -> None:
+        """切换思考展示（/thinking on|off）。"""
+        args = getattr(self, "_current_slash_args", "")
+        arg = args.strip().lower()
+        if arg == "on":
+            self._show_thinking = True
+            self.console.print("[green]思考展示已开启[/green]")
+        elif arg == "off":
+            self._show_thinking = False
+            self.console.print("[yellow]思考展示已关闭[/yellow]")
         else:
-            self.console.print(f"[yellow]未知命令: {cmd}，输入 /help 查看可用命令[/yellow]")
+            self.console.print("[yellow]用法: /thinking on|off[/yellow]")
 
     async def _handle_compact(self) -> None:
         """手动 /compact：跳过阈值、无条件触发一次 LLM 摘要。"""
@@ -294,27 +467,11 @@ class ForgeApp:
         except Exception as e:
             self.console.print(f"[red]压缩失败: {e}[/red]")
 
-    def _handle_memory(self) -> None:
-        """查看当前记忆索引。"""
-        if self._mem_mgr is None:
-            self.console.print("[dim]记忆系统未初始化[/dim]")
-            return
-
-        text = self._mem_mgr.load_index()
-        if not text.strip():
-            self.console.print("[dim]暂无记忆。对话中提及重要信息时，系统会自动记录。[/dim]")
-            return
-
-        self.console.print()
-        self.console.print(Panel(text.strip(), title="记忆索引", border_style="dim"))
-        self.console.print()
-
     async def _handle_resume(self) -> None:
-        """处理 /resume 命令：显示会话列表 + 选择恢复。"""
-        if self._agent_running:
-            self.console.print("[yellow]请等待当前任务完成后再使用 /resume[/yellow]")
-            return
+        """处理 /resume 命令：显示会话列表 + 选择恢复。
 
+        注意：idle 守卫已在 dispatch_slash 按 Kind 统一处理。
+        """
         if not self._sessions_dir:
             self.console.print("[yellow]会话目录未初始化，无法恢复[/yellow]")
             return
@@ -339,16 +496,33 @@ class ForgeApp:
 
         self.console.print()
 
-        # 等待用户选择
+        # 等待用户选择（prompt_toolkit prompt 支持 ESC 立即取消）
+        def _read_choice() -> str:
+            kb = KeyBindings()
+
+            @kb.add("escape")
+            def _on_esc(event: object) -> None:
+                event.app.exit(result="__ESC__")  # type: ignore[union-attr]
+
+            @kb.add("enter")
+            def _on_enter(event: object) -> None:
+                event.app.exit(result=event.app.current_buffer.text)  # type: ignore[union-attr]
+
+            try:
+                return pt_prompt(
+                    "  选择序号（Esc 取消）: ",
+                    key_bindings=kb,
+                ).strip()
+            except (EOFError, KeyboardInterrupt):
+                return "__ESC__"
+
         try:
-            choice = await asyncio.get_running_loop().run_in_executor(
-                None, lambda: input("  选择序号（Esc 取消）: ").strip()
-            )
+            choice = await asyncio.get_running_loop().run_in_executor(None, _read_choice)
         except (EOFError, KeyboardInterrupt):
             self.console.print("[dim]已取消[/dim]")
             return
 
-        if not choice:
+        if not choice or choice == "__ESC__":
             self.console.print("[dim]已取消[/dim]")
             return
 

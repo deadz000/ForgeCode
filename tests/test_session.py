@@ -115,6 +115,15 @@ def test_open_existing_append(tmp_path):
     assert len(lines) == 2
 
 
+def test_writer_path_property(tmp_path):
+    """Writer.path 返回 conversation.jsonl 的绝对路径。"""
+    session_dir = str(tmp_path / "test-session")
+    w = Writer(session_dir)
+    assert w.path.endswith("conversation.jsonl")
+    assert os.path.isabs(w.path)
+    assert os.path.isfile(w.path)
+
+
 # ── load_session 测试 ─────────────────────────────
 
 

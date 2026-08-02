@@ -123,6 +123,10 @@ class Registry:
         t = self.get(name)
         return t is not None and getattr(t, "read_only", False)
 
+    def count(self) -> int:
+        """返回当前已注册工具数量。"""
+        return len(self._tools)
+
     async def execute(self, name: str, args: str, timeout: float = DEFAULT_TIMEOUT) -> Result:
         """按名查找工具并执行，带超时保护。"""
         tool = self.get(name)

@@ -36,6 +36,11 @@ class Writer:
         self._lock = threading.Lock()
         self._closed = False
 
+    @property
+    def path(self) -> str:
+        """返回 writer 对应的 JSONL 文件绝对路径。"""
+        return self._path
+
     @classmethod
     def open_existing(cls, session_dir: str) -> Writer:
         """以追加模式打开已有会话的 JSONL（不创建目录）。"""
