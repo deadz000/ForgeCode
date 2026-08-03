@@ -207,7 +207,7 @@
 **步骤：**
 1. `app.py`：
    - `SessionState` 枚举新增 `RESUMING = "resuming"`
-   - `MewCodeApp` 新增字段：`writer: session.Writer`、`mem_mgr: memory.Manager`、`instruction_text: str`、`memory_text: str`、`sessions_dir: str`
+   - `ForgeCodeApp` 新增字段：`writer: session.Writer`、`mem_mgr: memory.Manager`、`instruction_text: str`、`memory_text: str`、`sessions_dir: str`
    - `__init__` 扩展：接收 writer、mem_mgr、instruction_text、memory_text
    - `on_key` / 子组件分发：`RESUMING` 状态分发到 `resume.handle_resume_key`
    - `compose` / 显示：`RESUMING` 时显示会话列表
@@ -254,7 +254,7 @@
    - `asyncio.create_task(session.clean_expired(sessions_dir, timedelta(days=30)))`
 4. 修改 `Conversation()` 构造 → `Conversation(on_append=writer.on_append, on_replace=writer.on_replace)`
    其中 `on_append` / `on_replace` 是 Writer 上的闭包/方法，内部包装 `append` / `write_compact_marker + append_all`
-5. 修改 `MewCodeApp(...)` 调用：传入 `writer`、`mem_mgr`、`instruction_text`、`memory_text`
+5. 修改 `ForgeCodeApp(...)` 调用：传入 `writer`、`mem_mgr`、`instruction_text`、`memory_text`
 6. 在 TUI 的 provider 选定回调中：调 `mem_mgr.set_provider(provider, model)`
 
 **验证：** `python -m forgecode` 能启动；`ruff check src/forgecode` 无告警；`mypy src/forgecode` 无报错（可选）

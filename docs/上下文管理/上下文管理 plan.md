@@ -592,7 +592,7 @@ def replace_history(self, msgs: list[Message]) -> None:
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-CommandHandler = Callable[[Any], Awaitable[None]]   # 入参为 MewCodeApp
+CommandHandler = Callable[[Any], Awaitable[None]]   # 入参为 ForgeCodeApp
 
 def dispatch_command(input_: str) -> tuple[CommandHandler | None, bool]:
     """检查输入是否以 "/" 开头;命中则返回对应命令处理器;
@@ -607,7 +607,7 @@ BUILTIN_COMMANDS: dict[str, CommandHandler] = {
     "/compact": handle_compact,
 }
 
-async def handle_compact(app: "MewCodeApp") -> None:
+async def handle_compact(app: "ForgeCodeApp") -> None:
     """在 asyncio.create_task 里调 app.agent.run_force_compact(...)；
     完成后用 app.call_from_thread / app.post_message 把 (before, after, err)
     抛回 TUI 主循环，由 Update 决定打印系统消息:成功 "已压缩，token 从 X 降至 Y",
@@ -615,10 +615,10 @@ async def handle_compact(app: "MewCodeApp") -> None:
     """
 ```
 
-`MewCodeApp` 字段调整：
+`ForgeCodeApp` 字段调整：
 
 ```python
-class MewCodeApp(App):
+class ForgeCodeApp(App):
     runtime: SessionRuntime  # 新增:跨 run 持有的长生命周期状态
     agent: Agent             # 新增:常驻 Agent 实例(在 _begin_turn 内复用,不再每轮 new)
 ```
@@ -834,14 +834,14 @@ tests/compact/
 
 `src/forgecode/tui/commands.py`（新文件）：`dispatch_command` + `handle_exit` / `handle_plan` / `handle_do` / `handle_compact` + 未知命令兜底。
 `src/forgecode/tui/stream.py`：`submit()` 内原 `match/case` 改用 `dispatch_command` 调用；命令路径不调 `conv.add_user`，不写入对话历史。
-`src/forgecode/tui/app.py`：`MewCodeApp` 新增 `runtime: SessionRuntime` 与 `agent: Agent` 字段；`__init__` 构造期一次性构造 Agent 并保存。
+`src/forgecode/tui/app.py`：`ForgeCodeApp` 新增 `runtime: SessionRuntime` 与 `agent: Agent` 字段；`__init__` 构造期一次性构造 Agent 并保存。
 `tests/tui/test_tui.py`：① `/compact` 走命令路径不发 LLM；② `/unknown` 友好提示；③ 迁移后 `/exit` / `/plan` / `/do` 行为不回归三个用例。
 
 `src/forgecode/config/config.py`：`ProviderConfig` 追加 `context_window: int = 0`，加 `effective_context_window(p)`；现有字段顺序与 yaml 键名不变。
 `src/forgecode/config/protocol_defaults.py`（新文件）：`DEFAULT_ANTHROPIC_CONTEXT_WINDOW = 200000`、`DEFAULT_OPENAI_CONTEXT_WINDOW = 128000`。
 `tests/test_config.py`：新增四种情况断言。
 
-`src/forgecode/cli.py`：启动阶段调 `new_session_context(workspace)`、`ContentReplacementState()`、`RecoveryState()`、`CompactCircuitBreaker()`，组装为 `SessionRuntime`；待 provider 选定后注入 `effective_context_window(p)`；把 `SessionRuntime` 交给 `MewCodeApp`。
+`src/forgecode/cli.py`：启动阶段调 `new_session_context(workspace)`、`ContentReplacementState()`、`RecoveryState()`、`CompactCircuitBreaker()`，组装为 `SessionRuntime`；待 provider 选定后注入 `effective_context_window(p)`；把 `SessionRuntime` 交给 `ForgeCodeApp`。
 
 `scripts/smoke.py`（若存在）：同样按新签名构造 Agent；smoke 场景的 `context_window` 可固定 200000。
 

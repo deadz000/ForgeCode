@@ -8,8 +8,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
-import sys
 
 import httpx
 import mcp.types as mtypes
@@ -19,7 +19,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 from forgecode.mcp.config import Config, ServerConfig
 from forgecode.mcp.tool import McpTool, adapt_tool
-import logging
+
 logger = logging.getLogger(__name__)
 
 # ── 超时常量（非常量，便于单测 monkeypatch）────────

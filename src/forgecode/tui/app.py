@@ -22,12 +22,15 @@ from rich.text import Text
 from forgecode.agent import Agent, ApprovalRequest, CompactEvent, CompactPhase, Phase, ToolEvent
 from forgecode.command import Kind as CmdKind
 from forgecode.command import Registry as CmdRegistry
-from forgecode.command.ui import SkillSummary
 from forgecode.command import parse as parse_command
 from forgecode.command import register_builtins
 from forgecode.command.command import Command as CmdCommand
+from forgecode.command.ui import SkillSummary
 from forgecode.config.schema import AppConfig
 from forgecode.conversation.history import Conversation
+from forgecode.hook import DispatchResult
+from forgecode.hook.engine import Engine as HookEngine
+from forgecode.hook.event import Event as HookEvent
 from forgecode.permission import Mode, Outcome
 from forgecode.permission.engine import Engine
 from forgecode.prompt import EXECUTE_DIRECTIVE
@@ -40,8 +43,8 @@ from forgecode.tui.complete import SlashCompleter
 FORGECODE_ART = r"""
    ███████╗ ██████╗ ██████╗  ██████╗ ███████╗ ██████╗ ██████╗ ██████╗ ███████╗
    ██╔════╝██╔═══██╗██╔══██╗██╔════╝ ██╔════╝██╔════╝██╔═══██╗██╔══██╗██╔════╝
-   █████╗  ██║   ██║██████╔╝██║  ███╗█████╗  ██║     ██║   ██║██║  ██║█████╗  
-   ██╔══╝  ██║   ██║██╔══██╗██║   ██║██╔══╝  ██║     ██║   ██║██║  ██║██╔══╝  
+   █████╗  ██║   ██║██████╔╝██║  ███╗█████╗  ██║     ██║   ██║██║  ██║█████╗
+   ██╔══╝  ██║   ██║██╔══██╗██║   ██║██╔══╝  ██║     ██║   ██║██║  ██║██╔══╝
    ██║     ╚██████╔╝██║  ██║╚██████╔╝███████╗╚██████╗╚██████╔╝██████╔╝███████╗
    ╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝ ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝
 """
@@ -80,6 +83,7 @@ class ForgeApp:
         cmd_registry=None,
         catalog=None,
         executor=None,
+        hook_engine: HookEngine | None = None,
     ) -> None:
         self.config = config
         self.provider = provider
@@ -87,6 +91,9 @@ class ForgeApp:
         self.registry = registry
         self.engine = engine
         self.runtime = runtime
+        self.hook_engine = hook_engine
+        if runtime is not None:
+            runtime.hook_engine = hook_engine
         self.console = Console()
         self._show_thinking: bool = False
         self._exit_flag: bool = False
@@ -176,6 +183,7 @@ class ForgeApp:
                 instruction_text=self._instruction_text,
                 memory_text=self._memory_text,
                 catalog=self.catalog,
+                hook_engine=self.hook_engine,
             )
         return self._agent
 
@@ -274,8 +282,11 @@ class ForgeApp:
     async def open_resume_menu(self) -> None:
         await self._handle_resume()
 
-    def clear_and_new_session(self) -> None:
+    async def clear_and_new_session(self) -> None:
         """关闭当前会话，创建新 SessionContext/Writer/Conversation 并重置状态。"""
+        # 派发 SessionEnd（旧会话）
+        await self._dispatch_session_end()
+
         # 关闭旧 writer
         if self._writer is not None:
             try:
@@ -330,6 +341,61 @@ class ForgeApp:
         self._iter = 0
         self._response_elapsed = 0
 
+        # 派发 SessionStart（新会话）
+        await self._dispatch_session_start()
+
+    # ── Hook 查询 ──────────────────────────────────
+
+    def hook_sources(self) -> list[str]:
+        """已加载 hook 的来源文件列表。"""
+        if self.hook_engine is None:
+            return []
+        return self.hook_engine.sources
+
+    def hook_rules(self) -> list:
+        """已加载的 hook 规则列表。"""
+        if self.hook_engine is None:
+            return []
+        return self.hook_engine.rules
+
+    # ── Hook 会话事件分发 ─────────────────────────
+
+    def _base_payload(self, event: HookEvent) -> dict:
+        """构造 hook payload 通用字段。"""
+        return {
+            "event": event.value,
+            "session_id": self.session_id(),
+            "cwd": os.getcwd(),
+            "mode": self.mode.name.lower(),
+        }
+
+    async def _dispatch_hook(self, event: HookEvent, payload: dict) -> DispatchResult:
+        """分派 hook 事件；把注入的 prompt 追加到 runtime 的 reminder 队列。"""
+        if self.hook_engine is None:
+            return DispatchResult()
+        result = await self.hook_engine.dispatch(event, payload)
+        if result.injected_prompts and self.runtime is not None:
+            self.runtime.append_reminders(result.injected_prompts)
+        return result
+
+    async def _dispatch_session_start(self) -> None:
+        """SessionStart：进程启动 / /clear 新建会话后。"""
+        await self._dispatch_hook(
+            HookEvent.SESSION_START, self._base_payload(HookEvent.SESSION_START)
+        )
+
+    async def _dispatch_session_end(self) -> None:
+        """SessionEnd：进程关闭 / 会话切换离开前。"""
+        await self._dispatch_hook(
+            HookEvent.SESSION_END, self._base_payload(HookEvent.SESSION_END)
+        )
+
+    async def _dispatch_session_resume(self) -> None:
+        """SessionResume：历史会话恢复完成后。"""
+        await self._dispatch_hook(
+            HookEvent.SESSION_RESUME, self._base_payload(HookEvent.SESSION_RESUME)
+        )
+
     # ── 遗留命令 handler（hidden=True，仅供 cmd_registry 引用）──
 
     async def _legacy_providers_handler(self, _ui) -> None:
@@ -356,6 +422,7 @@ class ForgeApp:
     async def run_async(self) -> None:
         """异步主循环。"""
         self._render_banner()
+        await self._dispatch_session_start()
 
         history = InMemoryHistory()
         session: PromptSession[str] = PromptSession(
@@ -401,6 +468,8 @@ class ForgeApp:
             except asyncio.CancelledError:
                     self.console.print()
                     self.console.print("[dim]已中断[/dim]")
+
+        await self._dispatch_session_end()
 
     # ── 命令分发 ──────────────────────────────────
 
@@ -497,7 +566,7 @@ class ForgeApp:
         )
         self.console.print("[dim]正在压缩上下文...[/dim]")
         try:
-            before, after = await agent.run_force_compact(self.conversation, defs)
+            before, after = await agent.run_force_compact(self.conversation, defs, self.mode)
             self.console.print(f"[dim]已压缩，token 从 {before} 降至 {after}[/dim]")
         except Exception as e:
             self.console.print(f"[red]压缩失败: {e}[/red]")
@@ -573,11 +642,19 @@ class ForgeApp:
         selected = sessions[idx]
         self.console.print(f"[dim]正在恢复会话 {selected.id}...[/dim]")
 
+        # 派发 SessionEnd（旧会话）
+        await self._dispatch_session_end()
+
         try:
             msg = await do_resume_session(self, selected)
-            self.console.print(f"[green]{msg}[/green]")
         except Exception as e:
             self.console.print(f"[red]恢复失败: {e}[/red]")
+            return
+
+        if msg.startswith("已恢复"):
+            # 恢复完成后派发 SessionResume（新会话）
+            await self._dispatch_session_resume()
+        self.console.print(f"[green]{msg}[/green]")
 
     # ── 提交消息 ──────────────────────────────────
 
@@ -585,6 +662,16 @@ class ForgeApp:
         """用户提交消息 → Agent 接管。"""
         # /do 场景下文本已由命令处理器加入
         if text != EXECUTE_DIRECTIVE:
+            # UserPromptSubmit hook：可拦截用户输入
+            result = await self._dispatch_hook(
+                HookEvent.USER_PROMPT_SUBMIT,
+                {**self._base_payload(HookEvent.USER_PROMPT_SUBMIT), "prompt": text},
+            )
+            if result.blocked:
+                self.console.print(
+                    f"[red][hook {result.blocking_hook_name}] {result.reason}[/red]"
+                )
+                return  # 不消费输入，焦点仍在输入框
             self.conversation.add_user(text)
 
         # 开始计时 + 创建取消事件

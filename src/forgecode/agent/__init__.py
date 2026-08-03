@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from enum import Enum, IntEnum
@@ -25,6 +26,9 @@ from forgecode.conversation.history import (
     ToolDefinition,
     ToolResult,
 )
+from forgecode.hook import DispatchResult, Payload
+from forgecode.hook.engine import Engine as HookEngine
+from forgecode.hook.event import Event as HookEvent
 from forgecode.permission import Decision, Mode, Outcome
 from forgecode.permission.engine import Engine
 from forgecode.prompt import (
@@ -33,6 +37,7 @@ from forgecode.prompt import (
     plan_reminder,
     render_active_skills_block,
     render_skills_catalog,
+    system_reminder,
 )
 from forgecode.providers import (
     BaseProvider,
@@ -135,6 +140,7 @@ class Agent:
         memory_text: str = "",
         catalog=None,
         allowed_tools: list[str] | None = None,
+        hook_engine: HookEngine | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -145,6 +151,7 @@ class Agent:
         self._memory_text = memory_text
         self._catalog = catalog
         self._allowed_tools = allowed_tools
+        self._hook_engine = hook_engine
 
         if runtime is None:
             from forgecode.agent.runtime import new_runtime
@@ -160,6 +167,40 @@ class Agent:
     def clear_active_skills(self) -> None:
         if self.runtime is not None and self.runtime.active_skills is not None:
             self.runtime.active_skills.clear()
+
+    # ── Hook 集成 ─────────────────────────────────────
+
+    def _hook_payload(self, event: HookEvent, mode: Mode, **extra: Any) -> Payload:
+        """构造事件分派 payload：通用字段 + 事件特化字段。"""
+        p: Payload = {
+            "event": event.value,
+            "session_id": self.runtime.session.session_id
+            if self.runtime is not None and self.runtime.session
+            else "",
+            "cwd": os.getcwd(),
+            "mode": mode.name.lower(),
+        }
+        p.update(extra)
+        return p
+
+    async def _dispatch_hook(self, event: HookEvent, payload: Payload) -> DispatchResult:
+        """分派一个 hook 事件，并把注入的 prompt 追加到 reminder 队列。"""
+        if self._hook_engine is None:
+            return DispatchResult()
+        result = await self._hook_engine.dispatch(event, payload)
+        if result.injected_prompts and self.runtime is not None:
+            self.runtime.append_reminders(result.injected_prompts)
+        return result
+
+    def _build_reminder(self, mode: Mode, it: int) -> str:
+        """装配本轮 reminder：plan reminder + hook 注入的 prompt（置于其后）。"""
+        parts: list[str] = []
+        if mode == Mode.PLAN:
+            full = it == 1 or (it - 1) % PLAN_REMINDER_INTERVAL == 0
+            parts.append(plan_reminder(full))
+        for prompt in self.runtime.take_reminders():
+            parts.append(system_reminder(prompt))
+        return "\n\n".join(parts)
 
     async def run(
         self,
@@ -238,6 +279,12 @@ class Agent:
                 and not self.runtime.auto_tracking.tripped()
             )
 
+            # ── PreCompact / PostCompact hook（自动路径）──
+            await self._dispatch_hook(
+                HookEvent.PRE_COMPACT,
+                self._hook_payload(HookEvent.PRE_COMPACT, mode, trigger="auto", before_tokens=est),
+            )
+
             if will_summarize:
                 yield Event(compact=CompactEvent(phase=CompactPhase.BEFORE_AUTO))
 
@@ -247,6 +294,17 @@ class Agent:
             except Exception as e:
                 mc_err = e
                 out = ManageOutput(before_tokens=est, after_tokens=0)
+
+            await self._dispatch_hook(
+                HookEvent.POST_COMPACT,
+                self._hook_payload(
+                    HookEvent.POST_COMPACT,
+                    mode,
+                    trigger="auto",
+                    before_tokens=out.before_tokens,
+                    after_tokens=out.after_tokens,
+                ),
+            )
 
             if will_summarize:
                 yield Event(
@@ -259,6 +317,15 @@ class Agent:
                 )
 
             if mc_err is not None:
+                await self._dispatch_hook(
+                    HookEvent.NOTIFICATION,
+                    self._hook_payload(
+                        HookEvent.NOTIFICATION,
+                        mode,
+                        kind="stream_error",
+                        detail=str(mc_err),
+                    ),
+                )
                 yield Event(err=mc_err)
                 return
 
@@ -267,11 +334,16 @@ class Agent:
                 spill = self.runtime.session.spill_dir
                 yield Event(notice=f"已落盘 {out.offloaded} 个大工具结果到 {spill}")
 
-            # ── Plan Mode reminder ──
-            reminder = ""
-            if mode == Mode.PLAN:
-                full = it == 1 or (it - 1) % PLAN_REMINDER_INTERVAL == 0
-                reminder = plan_reminder(full)
+            # ── PreUserMessage hook（在 provider.stream 之前）──
+            await self._dispatch_hook(
+                HookEvent.PRE_USER_MESSAGE,
+                self._hook_payload(
+                    HookEvent.PRE_USER_MESSAGE, mode, prompt=_last_user_text(conv)
+                ),
+            )
+
+            # ── Reminder 装配：plan reminder + hook 注入 prompt（置于其后）──
+            reminder = self._build_reminder(mode, it)
 
             # ── stream_once ──
             stream_result: dict[str, Any] = {}
@@ -288,7 +360,7 @@ class Agent:
             if err is not None:
                 # ── 紧急压缩处理 ──
                 if isinstance(err, PromptTooLongError):
-                    async for ev in self._emergency_compact(conv, est, err):
+                    async for ev in self._emergency_compact(conv, est, err, mode):
                         yield ev
                     # 重新估算
                     est2 = estimate_tokens(0, conv.messages, 0)
@@ -310,6 +382,12 @@ class Agent:
                 if cancel.is_set():
                     await _finish_cancelled(conv)
                     return
+                await self._dispatch_hook(
+                    HookEvent.NOTIFICATION,
+                    self._hook_payload(
+                        HookEvent.NOTIFICATION, mode, kind="stream_error", detail=str(err)
+                    ),
+                )
                 yield Event(err=err)
                 await _ensure_assistant_tail(conv, NOTICE_STREAM_ERR)
                 return
@@ -324,6 +402,10 @@ class Agent:
                 conv.add_assistant(text or "（任务完成）")
                 # ── 记忆更新触发 ──
                 await self._maybe_update_memory(conv)
+                await self._dispatch_hook(
+                    HookEvent.STOP,
+                    self._hook_payload(HookEvent.STOP, mode, iter=it),
+                )
                 yield Event(done=True)
                 return
 
@@ -338,7 +420,14 @@ class Agent:
             # 工具执行
             batched_result: dict[str, Any] = {}
             async for ev in _execute_batched(
-                self._registry, self._engine, calls, mode, cancel, self.runtime, batched_result
+                self._registry,
+                self._engine,
+                calls,
+                mode,
+                cancel,
+                self.runtime,
+                batched_result,
+                self._hook_engine,
             ):
                 yield ev
 
@@ -353,9 +442,17 @@ class Agent:
             if unknown_run >= MAX_UNKNOWN_RUN:
                 yield Event(notice=NOTICE_UNKNOWN_TOOLS)
                 await _ensure_assistant_tail(conv, NOTICE_UNKNOWN_TOOLS)
+                await self._dispatch_hook(
+                    HookEvent.STOP,
+                    self._hook_payload(HookEvent.STOP, mode, iter=it),
+                )
                 yield Event(done=True)
                 return
 
+        await self._dispatch_hook(
+            HookEvent.STOP,
+            self._hook_payload(HookEvent.STOP, mode, iter=it),
+        )
         yield Event(notice=NOTICE_MAX_ITER)
         await _ensure_assistant_tail(conv, NOTICE_MAX_ITER)
         yield Event(done=True)
@@ -380,8 +477,14 @@ class Agent:
             # 异步执行，不阻塞用户下一次输入
             asyncio.create_task(self._memory_manager.update_async(recent_msgs))
 
-    async def _emergency_compact(self, conv: Conversation, est: int, err: Exception) -> AsyncIterator[Event]:
+    async def _emergency_compact(
+        self, conv: Conversation, est: int, err: Exception, mode: Mode
+    ) -> AsyncIterator[Event]:
         """紧急压缩：先 layer1 再 force_compact。"""
+        await self._dispatch_hook(
+            HookEvent.PRE_COMPACT,
+            self._hook_payload(HookEvent.PRE_COMPACT, mode, trigger="emergency", before_tokens=est),
+        )
         yield Event(compact=CompactEvent(phase=CompactPhase.BEFORE_EMERGENCY))
 
         in_ = ManageInput(
@@ -407,6 +510,16 @@ class Agent:
             mc_err = e
             out = ManageOutput(before_tokens=est, after_tokens=0)
 
+        await self._dispatch_hook(
+            HookEvent.POST_COMPACT,
+            self._hook_payload(
+                HookEvent.POST_COMPACT,
+                mode,
+                trigger="emergency",
+                before_tokens=out.before_tokens,
+                after_tokens=out.after_tokens,
+            ),
+        )
         yield Event(
             compact=CompactEvent(
                 phase=CompactPhase.AFTER_EMERGENCY,
@@ -422,12 +535,19 @@ class Agent:
         self.runtime.usage_anchor = 0
         self.runtime.anchor_msg_len = 0
 
-    async def run_force_compact(self, conv: Conversation, tool_defs: list[ToolDefinition]) -> tuple[int, int]:
+    async def run_force_compact(
+        self, conv: Conversation, tool_defs: list[ToolDefinition], mode: Mode = Mode.DEFAULT
+    ) -> tuple[int, int]:
         """手动 /compact 入口，由 TUI 调用。"""
         async with self._run_lock:
             anchor = self.runtime.usage_anchor
             anchor_len = self.runtime.anchor_msg_len
             est = estimate_tokens(anchor, conv.messages, anchor_len)
+
+            await self._dispatch_hook(
+                HookEvent.PRE_COMPACT,
+                self._hook_payload(HookEvent.PRE_COMPACT, mode, trigger="manual", before_tokens=est),
+            )
 
             in_ = ManageInput(
                 conv=conv,
@@ -445,6 +565,17 @@ class Agent:
                 trigger=TriggerKind.MANUAL,
             )
             out = await manage_context(in_)
+
+            await self._dispatch_hook(
+                HookEvent.POST_COMPACT,
+                self._hook_payload(
+                    HookEvent.POST_COMPACT,
+                    mode,
+                    trigger="manual",
+                    before_tokens=out.before_tokens,
+                    after_tokens=out.after_tokens,
+                ),
+            )
             return (out.before_tokens, out.after_tokens)
 
 
@@ -512,7 +643,7 @@ async def _stream_once(
     result["ok"] = True
 
 
-# ── execute_batched（含权限判定 + ReadFile 追踪）────
+# ── execute_batched（含权限判定 + Hook + ReadFile 追踪）────
 
 
 async def _execute_batched(
@@ -523,8 +654,9 @@ async def _execute_batched(
     cancel: asyncio.Event,
     runtime: Any,
     result: dict[str, Any],
+    hook_engine: HookEngine | None = None,
 ) -> AsyncIterator[Event]:
-    """保序分批并发执行，每工具前走权限判定，ReadFile 成功后写 recovery。"""
+    """保序分批并发执行，每工具前走 PreToolUse hook + 权限判定，ReadFile 成功后写 recovery。"""
     results: list[ToolResult | None] = [None] * len(calls)
     i = 0
 
@@ -544,7 +676,17 @@ async def _execute_batched(
                 j += 1
 
             denials: dict[int, tuple[Decision, str]] = {}
+            blocked_hooks: dict[int, tuple[str, str]] = {}
             for k in range(i, j):
+                hres = await _dispatch_hook(
+                    hook_engine,
+                    runtime,
+                    HookEvent.PRE_TOOL_USE,
+                    _hook_payload_for(HookEvent.PRE_TOOL_USE, mode, runtime, calls[k]),
+                )
+                if hres.blocked:
+                    blocked_hooks[k] = (hres.blocking_hook_name, hres.reason)
+                    continue
                 d, reason = engine.check(mode, calls[k], True)
                 if d == Decision.DENY:
                     denials[k] = (d, reason)
@@ -559,6 +701,14 @@ async def _execute_batched(
                 )
 
             async def _run_read_only(k: int) -> None:
+                if k in blocked_hooks:
+                    name, reason = blocked_hooks[k]
+                    results[k] = ToolResult(
+                        tool_call_id=calls[k].id,
+                        content=f"[hook {name}] {reason}",
+                        is_error=True,
+                    )
+                    return
                 if k in denials:
                     _, reason = denials[k]
                     results[k] = ToolResult(tool_call_id=calls[k].id, content=reason, is_error=True)
@@ -575,6 +725,19 @@ async def _execute_batched(
             for k in range(i, j):
                 r = results[k]
                 assert r is not None
+                await _dispatch_hook(
+                    hook_engine,
+                    runtime,
+                    HookEvent.POST_TOOL_USE,
+                    _hook_payload_for(
+                        HookEvent.POST_TOOL_USE,
+                        mode,
+                        runtime,
+                        calls[k],
+                        tool_result=_summary(r.content),
+                        is_error=r.is_error,
+                    ),
+                )
                 yield Event(
                     tool=ToolEvent(
                         name=calls[k].name, phase=Phase.END, result=_summary(r.content), is_error=r.is_error
@@ -585,47 +748,84 @@ async def _execute_batched(
         else:
             # 有副作用 → 串行
             call = calls[i]
-            d, reason = engine.check(mode, call, False)
-
+            hres = await _dispatch_hook(
+                hook_engine,
+                runtime,
+                HookEvent.PRE_TOOL_USE,
+                _hook_payload_for(HookEvent.PRE_TOOL_USE, mode, runtime, call),
+            )
             yield Event(tool=ToolEvent(name=call.name, args=_args_preview(call.input), phase=Phase.START))
 
-            if d == Decision.ALLOW:
-                exec_result = await registry.execute(call.name, call.input, timeout=DEFAULT_TIMEOUT)
+            if hres.blocked:
                 results[i] = ToolResult(
-                    tool_call_id=call.id, content=exec_result.content, is_error=exec_result.is_error
+                    tool_call_id=call.id,
+                    content=f"[hook {hres.blocking_hook_name}] {hres.reason}",
+                    is_error=True,
                 )
-                await _track_read_file(runtime, call, exec_result)
-            elif d == Decision.DENY:
-                results[i] = ToolResult(tool_call_id=call.id, content=reason, is_error=True)
-            else:  # ASK
-                respond: asyncio.Future[Outcome] = asyncio.get_running_loop().create_future()
-                yield Event(
-                    approval=ApprovalRequest(
-                        name=call.name,
-                        args=_args_preview(call.input),
-                        reason=reason,
-                        respond=respond,
-                    )
-                )
-                outcome = await respond
-                if outcome == Outcome.DENY_ONCE:
-                    results[i] = ToolResult(tool_call_id=call.id, content=reason, is_error=True)
-                else:
-                    if outcome == Outcome.ALLOW_FOREVER:
-                        try:
-                            from forgecode.permission.persist import persist_local_allow
-
-                            persist_local_allow(engine, call)
-                        except Exception:
-                            pass
+            else:
+                d, reason = engine.check(mode, call, False)
+                if d == Decision.ALLOW:
                     exec_result = await registry.execute(call.name, call.input, timeout=DEFAULT_TIMEOUT)
                     results[i] = ToolResult(
                         tool_call_id=call.id, content=exec_result.content, is_error=exec_result.is_error
                     )
                     await _track_read_file(runtime, call, exec_result)
+                elif d == Decision.DENY:
+                    results[i] = ToolResult(tool_call_id=call.id, content=reason, is_error=True)
+                else:  # ASK
+                    await _dispatch_hook(
+                        hook_engine,
+                        runtime,
+                        HookEvent.NOTIFICATION,
+                        _base_payload(
+                            HookEvent.NOTIFICATION,
+                            mode,
+                            runtime,
+                            kind="approval",
+                            detail=call.name,
+                        ),
+                    )
+                    respond: asyncio.Future[Outcome] = asyncio.get_running_loop().create_future()
+                    yield Event(
+                        approval=ApprovalRequest(
+                            name=call.name,
+                            args=_args_preview(call.input),
+                            reason=reason,
+                            respond=respond,
+                        )
+                    )
+                    outcome = await respond
+                    if outcome == Outcome.DENY_ONCE:
+                        results[i] = ToolResult(tool_call_id=call.id, content=reason, is_error=True)
+                    else:
+                        if outcome == Outcome.ALLOW_FOREVER:
+                            try:
+                                from forgecode.permission.persist import persist_local_allow
+
+                                persist_local_allow(engine, call)
+                            except Exception:
+                                pass
+                        exec_result = await registry.execute(call.name, call.input, timeout=DEFAULT_TIMEOUT)
+                        results[i] = ToolResult(
+                            tool_call_id=call.id, content=exec_result.content, is_error=exec_result.is_error
+                        )
+                        await _track_read_file(runtime, call, exec_result)
 
             r = results[i]
             assert r is not None
+            await _dispatch_hook(
+                hook_engine,
+                runtime,
+                HookEvent.POST_TOOL_USE,
+                _hook_payload_for(
+                    HookEvent.POST_TOOL_USE,
+                    mode,
+                    runtime,
+                    call,
+                    tool_result=_summary(r.content),
+                    is_error=r.is_error,
+                ),
+            )
             yield Event(
                 tool=ToolEvent(
                     name=call.name, phase=Phase.END, result=_summary(r.content), is_error=r.is_error
@@ -635,6 +835,61 @@ async def _execute_batched(
 
     result["results"] = _pack_results(results)
     result["completed"] = True
+
+
+# ── Hook 辅助 ─────────────────────────────────────
+
+
+def _base_payload(event: HookEvent, mode: Mode, runtime: Any, **extra: Any) -> Payload:
+    """构造 hook payload 通用字段（event / session_id / cwd / mode）。"""
+    p: Payload = {
+        "event": event.value,
+        "session_id": runtime.session.session_id
+        if runtime is not None and runtime.session
+        else "",
+        "cwd": os.getcwd(),
+        "mode": mode.name.lower(),
+    }
+    p.update(extra)
+    return p
+
+
+def _tool_input_dict(call: ToolCall) -> dict[str, Any]:
+    """解析工具输入 JSON 为 dict；失败返回空 dict。"""
+    try:
+        data = json.loads(call.input) if isinstance(call.input, str) else call.input
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _hook_payload_for(
+    event: HookEvent, mode: Mode, runtime: Any, call: ToolCall, **extra: Any
+) -> Payload:
+    """构造工具事件 payload：通用字段 + tool_name / tool_input。"""
+    return _base_payload(
+        event,
+        mode,
+        runtime,
+        tool_name=call.name,
+        tool_input=_tool_input_dict(call),
+        **extra,
+    )
+
+
+async def _dispatch_hook(
+    hook_engine: HookEngine | None,
+    runtime: Any,
+    event: HookEvent,
+    payload: Payload,
+) -> DispatchResult:
+    """分派 hook 事件；把注入的 prompt 追加到 runtime 的 reminder 队列。"""
+    if hook_engine is None:
+        return DispatchResult()
+    result = await hook_engine.dispatch(event, payload)
+    if result.injected_prompts and runtime is not None:
+        runtime.append_reminders(result.injected_prompts)
+    return result
 
 
 # ── ReadFile 追踪 ──────────────────────────────────
@@ -696,6 +951,14 @@ def _fill_cancelled(results: list[ToolResult | None], start: int) -> None:
 
 def _all_unknown(registry: Registry, calls: list[ToolCall]) -> bool:
     return all(registry.get(c.name) is None for c in calls)
+
+
+def _last_user_text(conv: Conversation) -> str:
+    """返回对话末尾最近一条 user 消息文本；无则返回空串。"""
+    for m in reversed(conv.messages):
+        if m.role == ROLE_USER:
+            return m.content
+    return ""
 
 
 async def _ensure_assistant_tail(conv: Conversation, fallback: str) -> None:

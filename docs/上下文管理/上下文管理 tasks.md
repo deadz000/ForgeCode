@@ -31,7 +31,7 @@
 | `src/forgecode/agent/agent.py` | 修改 | `__init__` 接受 `runtime` 关键字参数；`_stream_once` 签名改为返回 err；主循环集成 compact、ReadFile 追踪、PTL 紧急压缩、`run_force_compact`、`_run_lock` 互斥锁 |
 | `tests/agent/test_agent.py` | 修改 | fake_provider 扩展 + 紧急压缩两用例 |
 | `src/forgecode/tui/commands.py` | 新建 | 命令分发 + `/exit` / `/plan` / `/do` / `/compact` 处理器 + 未知命令兜底 |
-| `src/forgecode/tui/app.py` | 修改 | `MewCodeApp` 新增 `runtime: SessionRuntime` 与 `agent: Agent` 字段；`__init__` 构造期一次性构造 Agent |
+| `src/forgecode/tui/app.py` | 修改 | `ForgeCodeApp` 新增 `runtime: SessionRuntime` 与 `agent: Agent` 字段；`__init__` 构造期一次性构造 Agent |
 | `src/forgecode/tui/stream.py` | 修改 | `submit()` 内原 match 改用 `dispatch_command` |
 | `tests/tui/test_tui.py` | 修改 | 5 组用例:`/compact` 路由到命令分发、`/unknown` 友好提示、迁移后 `/exit` / `/plan` / `/do` 各一组不回归 |
 | `src/forgecode/cli.py` | 修改 | 启动期构造 `SessionRuntime` 注入 TUI；待 provider 选定后再注入 `context_window` |
@@ -763,7 +763,7 @@
      auto_tracking = CompactCircuitBreaker()
      ```
 
-  2. `src/forgecode/cli.py`：若 `providers` 长度 == 1，启动期即可知 protocol → 直接计算 `cw = effective_context_window(providers[0])`，构造 `runtime = SessionRuntime(...)` 注入 `MewCodeApp`。若 `len(providers) > 1`，让 TUI 完成 provider 选择后再注入 `context_window`（在 TUI 的 provider-selected 回调里调 `runtime.context_window = effective_context_window(provider_cfg)`）。
+  2. `src/forgecode/cli.py`：若 `providers` 长度 == 1，启动期即可知 protocol → 直接计算 `cw = effective_context_window(providers[0])`，构造 `runtime = SessionRuntime(...)` 注入 `ForgeCodeApp`。若 `len(providers) > 1`，让 TUI 完成 provider 选择后再注入 `context_window`（在 TUI 的 provider-selected 回调里调 `runtime.context_window = effective_context_window(provider_cfg)`）。
   3. `scripts/smoke.py`：同样按新 Agent 构造签名调用 `Agent(..., runtime=runtime)`；smoke 场景 `context_window` 可固定 200000。
   4. Agent 内部由 TUI Model 持有（见 T32.5）：构造期一次性 `Agent(...)`，后续 `_begin_turn` 不再重新构造 Agent。
 - **验证**：`python -m forgecode --help` 可启动；启动后 `.forgecode/sessions/<id>/tool-results/` 目录存在。
@@ -773,7 +773,7 @@
 - **文件**：`src/forgecode/tui/app.py` + `src/forgecode/tui/stream.py`
 - **依赖**：T26、T32
 - **步骤**：
-  1. `MewCodeApp` 类新增字段 `runtime: SessionRuntime` 与 `agent: Agent`。
+  1. `ForgeCodeApp` 类新增字段 `runtime: SessionRuntime` 与 `agent: Agent`。
   2. `__init__` 接收 `runtime: SessionRuntime` 参数（cli 注入）。
   3. 若 providers 长度 == 1，`__init__` 内即可 `self.agent = Agent(self.provider, self.registry, self.version, self.engine, runtime=runtime)`。
   4. 若多 provider，需在用户选定 provider 后再构造 Agent。把构造时机抽到一个 `self._ensure_agent()` 方法里，由 `_begin_turn` 调一次（已构造时跳过）。
@@ -786,7 +786,7 @@
 - **依赖**：T30、T32.5
 - **步骤**：
   1. 新建 `commands.py`。
-  2. 定义 `CommandHandler = Callable[["MewCodeApp"], Awaitable[None]]`。
+  2. 定义 `CommandHandler = Callable[["ForgeCodeApp"], Awaitable[None]]`。
   3. 注册表初始填四项（迁移现有 `/exit` / `/plan` / `/do`，新增 `/compact`）：
 
      ```python

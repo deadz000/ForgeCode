@@ -56,8 +56,8 @@ def persist_local_allow(engine: Engine, call: ToolCall) -> None:
     if not ok:
         return
 
-    r, rok = parse_rule(rule_str)
-    if not rok:
+    r, _err = parse_rule(rule_str)
+    if r is None:
         return
     r.allow = True
 
@@ -85,7 +85,7 @@ def persist_local_allow(engine: Engine, call: ToolCall) -> None:
     )
 
     # 同步内存
-    if not any(existing.tool == r.tool and existing.pattern == r.pattern for existing in engine.local.allow):
+    if not any(existing.tool == r.tool and existing.matcher == r.matcher for existing in engine.local.allow):
         engine.local.allow.append(r)
 
 

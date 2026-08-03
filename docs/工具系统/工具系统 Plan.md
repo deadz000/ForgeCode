@@ -12,7 +12,7 @@
 - **forgecode.conversation（扩展）**：新增「assistant 工具调用回合」与「工具结果回合」的追加方法。
 - **forgecode.prompt（扩展）**：`SYSTEM_PROMPT` 增补 Agent 角色与工具使用约定。
 - **forgecode.tui（扩展）**：`submit` 改走 `Agent.run`；事件消费 task 处理工具事件；渲染 Claude Code 风格工具行与执行指示。
-- **cli.py（扩展）**：构造 `tool.new_default_registry()` 并注入 `MewCodeApp`。
+- **cli.py（扩展）**：构造 `tool.new_default_registry()` 并注入 `ForgeCodeApp`。
 
 依赖方向（无环）：`tool → llm`；`conversation → llm`；`agent → {llm, tool, conversation}`；`tui → {agent, tool, conversation, llm, prompt}`；`llm → {config, prompt}`。
 
@@ -224,7 +224,7 @@ def add_tool_results(self, results: list[ToolResult]) -> None:
 保留 `add_user`/`add_assistant`/`messages`/`__len__` 不变。
 
 ### `forgecode.tui`（扩展）**职责：** 渲染 `agent.Event`（文本/工具行/结果摘要/错误/结束），保持非阻塞（N2）。
-- `MewCodeApp.__init__(self, providers, version, registry)`：存 `self._registry`。
+- `ForgeCodeApp.__init__(self, providers, version, registry)`：存 `self._registry`。
 - 新增 reactive / 成员：`self._cur_tool: ToolDisplay | None`（执行中指示：name/args，非 None 即在 `#streaming` 渲染执行行）。
 - `submit`：`conv.add_user(text)` 后 `self._stream_task = asyncio.create_task(self._consume_agent_events())`，task 内构造 `agent = Agent(self.provider, self._registry)` 后 `async for ev in agent.run(self.conv):` 分派。
 - `_consume_agent_events` 分派：
@@ -241,7 +241,7 @@ def add_tool_results(self, results: list[ToolResult]) -> None:
 
 ```
 用户提交
-  └─ MewCodeApp.submit: conv.add_user(text); self._stream_task = asyncio.create_task(_consume_agent_events())
+  └─ ForgeCodeApp.submit: conv.add_user(text); self._stream_task = asyncio.create_task(_consume_agent_events())
        └─ _consume_agent_events:
             └─ agent = Agent(provider, registry); async for ev in agent.run(conv):
                  ├─ 请求#1: async for se in provider.stream(conv.messages(), registry.definitions()):
@@ -266,7 +266,7 @@ def add_tool_results(self, results: list[ToolResult]) -> None:
 forgecode/
 ├── pyproject.toml                          — 不变（已含 anthropic/openai/textual/rich/pyyaml）
 ├── src/forgecode/
-│   ├── cli.py                              — 修改：new_default_registry() 注入 MewCodeApp
+│   ├── cli.py                              — 修改：new_default_registry() 注入 ForgeCodeApp
 │   ├── llm/
 │   │   ├── __init__.py                     — 修改：新增 ToolCall/ToolResult/ToolDefinition/ROLE_TOOL；扩展 Message/StreamEvent；Provider.stream 加 tools 参数
 │   │   ├── anthropic_provider.py           — 修改：to_anthropic_tools；stream 解析 tool_use blocks；to_anthropic_messages 支持 tool_use/tool_result

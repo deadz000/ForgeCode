@@ -99,7 +99,7 @@
 **说明：** T6 改了 `Agent.run` 签名（加 `mode` 与 `cancel`），其调用方 `tui/stream.py` 在此步同步更新——本步完成后 `python -m forgecode` 才在**仓库级**重新可启动（T6 后只保证 agent 模块及其测试绿）。
 **步骤：**
 1. `app.py`：
-   - `MewCodeApp` 新增字段：`mode: agent.Mode = Mode.NORMAL`、`iter: int = 0`、`usage_in: int = 0`、`usage_out: int = 0`、`cur_tools: list[ToolDisplay] = []`（移除单个 `cur_tool`）、`turn_cancel: asyncio.Event | None = None`。
+   - `ForgeCodeApp` 新增字段：`mode: agent.Mode = Mode.NORMAL`、`iter: int = 0`、`usage_in: int = 0`、`usage_out: int = 0`、`cur_tools: list[ToolDisplay] = []`（移除单个 `cur_tool`）、`turn_cancel: asyncio.Event | None = None`。
    - 按键拆分：`ctrl+c` → `STREAMING` 时 `self.turn_cancel.set()`（不退出，等 generator 收尾）/ 否则 `self.exit()`；新增 `escape` → `STREAMING` 时 `self.turn_cancel.set()`。
 2. `stream.py`：
    - `submit`：识别 `/exit`（退出）、`/plan`（`mode = Mode.PLAN`、提示块、回 IDLE）、`/do`（`mode = Mode.NORMAL`、`conv.add_user(prompt.EXECUTE_DIRECTIVE)`、走启动流程）、普通文本（`conv.add_user`）。启动处：`self.turn_cancel = asyncio.Event()`；`self._stream_task = asyncio.create_task(self._consume_events(self.agent.run(self.conv, self.mode, self.turn_cancel)))`；`self.iter = 0`；`self.state = STREAMING`。

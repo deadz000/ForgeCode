@@ -246,7 +246,7 @@ EXECUTE_DIRECTIVE = "请按上面的计划开始执行。"
 
 `SYSTEM_PROMPT` 增补一句 Agent 循环约定（追加到现有文案）：`"Keep using tools across multiple steps to make progress, and only give your final concise answer once the task is complete."`（中文项目里保持英文 system prompt 风格，与 ch03 现有 `SYSTEM_PROMPT` 一致）。
 
-### `forgecode.tui`（扩展）**`MewCodeApp` 新增字段（`tui/app.py`）：**
+### `forgecode.tui`（扩展）**`ForgeCodeApp` 新增字段（`tui/app.py`）：**
 - `mode: agent.Mode`——当前模式（默认 `Mode.NORMAL`），`/plan`、`/do` 切换，跨轮保持。
 - `iter: int`——当前迭代轮次（进度显示），每轮 `iter` 事件更新，`finish_turn` 归零。
 - `usage_in: int`、`usage_out: int`——会话累计 token 用量，每个 `usage` 事件累加。
@@ -266,7 +266,7 @@ EXECUTE_DIRECTIVE = "请按上面的计划开始执行。"
 - `ToolEvent.PHASE_START`：若 `cur_reply` 非空先把 preamble 提交 `RichLog` 并清空；`self.cur_tools.append(ToolDisplay(name, args))`。
 - `ToolEvent.PHASE_END`：**FIFO 弹出队首** `self.cur_tools.pop(0)`（因 agent 保证 PHASE_START 与 PHASE_END 都按调用序发出，结束序 == 入队序，弹首即对应工具，无需按 name 匹配，重名工具也不会错位）；用其 args 定型工具行 → `RichLog.write(tool_line)` → `RichLog.write(tool_result_summary)`。
 
-**按键（`MewCodeApp.on_key` 或 `BINDINGS`，全局优先）：**
+**按键（`ForgeCodeApp.on_key` 或 `BINDINGS`，全局优先）：**
 - `ctrl+c`：`STREAMING` → `self.turn_cancel.set()`（取消本轮，不退出）；否则 `self.exit()`。
 - `escape`：`STREAMING` → `self.turn_cancel.set()`；其余忽略。
 
@@ -367,7 +367,7 @@ ch04 改了两个签名，必须同步所有调用方/实现方，否则导入�
 | Plan Mode 系统提示注入 | `Provider.stream` 加 `system_suffix: str = ""` 形参 | 系统提示在适配器内注入，要让计划态约束生效必须穿过 stream。加一个字符串形参最小且显式；备选「请求 options dataclass」更可扩展但改动面更大，YAGNI 下不引入。 |
 | Plan Mode 工具集 | 计划态只注入 `read_only_definitions()` | 物理上不给模型写/执行工具，即便提示被忽略也无法改动；只读分类靠 `Tool.read_only`。 |
 | `/do` 语义 | 切回 Normal + 注入 `EXECUTE_DIRECTIVE` 用户消息 + 立即启动 Loop | 用户选定「切回全工具并立即执行」；复用已在历史里的计划，`/do` 不入历史，只把执行指令作为用户消息驱动模型开干。 |
-| 模式状态存放 | 存于 TUI `MewCodeApp`，不进 `Conversation` | `Conversation` 是历史、`messages()` 返回副本，放不住可变模式；模式是会话级 UI 状态，跨轮保持，归 TUI 最自然。 |
+| 模式状态存放 | 存于 TUI `ForgeCodeApp`，不进 `Conversation` | `Conversation` 是历史、`messages()` 返回副本，放不住可变模式；模式是会话级 UI 状态，跨轮保持，归 TUI 最自然。 |
 | 多并发工具的 UI | `cur_tools: list[ToolDisplay]` 取代单个 `cur_tool` | 并发批同时有多个工具在跑，动态区需多行展示；结束事件按序逐个落 `RichLog`。 |
 | 进度事件 | 每轮起始 `yield Event(iter=n)`，UI 显示「第 N 轮」 | F9 让用户感知多轮推进；用非零 `iter` 字段分派，与 ch03 的零值分派惯例一致。 |
 | 通知 vs 历史 | 上限/未知工具的提示同时 yield `notice`（UI 灰字）并写入 assistant 历史 | UI 要让用户看到为何停；写入历史是为满足 `ensure_assistant_tail`（角色交替），二者用同一文案，避免历史里留空 assistant 回合。 |

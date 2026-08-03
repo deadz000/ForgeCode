@@ -29,7 +29,7 @@
 **步骤：**
 1. 在 `modules.py` 定义 `@dataclass(frozen=True) class Module: name: str; priority: int; content: str`。
 2. `def fixed_modules() -> list[Module]` 返回七个固定模块，内容内置（中英按现有 `SYSTEM_PROMPT` 风格，英文为主）：
-   - 身份(10)：MewCode 是终端编码 Agent。
+   - 身份(10)：ForgeCode 是终端编码 Agent。
    - 系统约束(20)：操作边界——在工作目录约定内行事、不外泄密钥、对破坏性操作谨慎。
    - 任务模式(30)：ReAct——多步推进、读后再改、完成才给终答。
    - 动作执行(40)：何时调工具、连续只读可并发、有副作用谨慎。

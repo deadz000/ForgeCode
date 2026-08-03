@@ -248,7 +248,7 @@ cli.main()
   ├─ permission.Engine()
   ├─ agent.SessionRuntime(ctx_window)
   │   └─ runtime.session = ses_ctx
-  └─ MewCodeApp(providers, ..., writer, mem_mgr, instruction_text, memory_text).run()
+  └─ ForgeCodeApp(providers, ..., writer, mem_mgr, instruction_text, memory_text).run()
        └─ 选定 provider 后：
            ├─ mem_mgr.set_provider(provider, model)
            └─ Agent(..., memory_manager=mem_mgr)

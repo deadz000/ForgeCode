@@ -10,7 +10,7 @@ ch06 新增一个 **permission 模块**承载前四层防御与配置加载，�
 
 - **permission 模块（新增）**：定义 `Mode`（四档 IntEnum）、`Decision`（Allow/Deny/Ask）、`Category`（Read/Write/Exec）；实现前四层判定 `Engine.check`；持有黑名单正则集、沙箱（项目根 + 符号链接解析）、三级规则集（user/project/local 三个配置文件）、模式兜底矩阵、友好名映射与路径提取。对外暴露 `check`、本地规则持久化、配置加载。仅依赖 `llm`（取 `ToolCall`）与标准库 + `pyyaml`。
 - **agent 模块（改造）**：`Mode` 类型迁移到 permission 模块（`ModeNormal`→`ModeDefault`，新增 `ModeAcceptEdits`/`ModeBypass`）；`Agent` 持有 `Engine`；`execute_batched` 在执行每个工具前调用 `engine.check`——Allow 执行、Deny 直接产被拒结果、Ask 发 `ApprovalEvent` 并 `await` 用户决策；新增 `ApprovalRequest` 事件类型与决策回传 `asyncio.Future`/`asyncio.Queue`。plan 档的只读工具集与提醒沿用 ch04（键 `mode == Mode.PLAN`）。
-- **tui 模块（改造）**：`MewCodeApp.mode` 改为 `permission.Mode`，持有 `Engine`；新增 `Approving` 态与待批准请求渲染/按键处理；**全局 ctrl+c/esc 分派从仅 `Streaming` 扩展到 `Streaming | Approving`**（见下，否则 approving 态 ctrl+c 会退出整个程序）；**新增全局 `shift+tab` 按键循环切换权限模式**（仅 idle 态生效）；状态栏左侧改为**常驻显示当前权限模式（取代 provider 名）**；把会话/永久放行的规则写入交给引擎（经 agent 在 Loop 内应用，TUI 只回传用户选择）。
+- **tui 模块（改造）**：`ForgeCodeApp.mode` 改为 `permission.Mode`，持有 `Engine`；新增 `Approving` 态与待批准请求渲染/按键处理；**全局 ctrl+c/esc 分派从仅 `Streaming` 扩展到 `Streaming | Approving`**（见下，否则 approving 态 ctrl+c 会退出整个程序）；**新增全局 `shift+tab` 按键循环切换权限模式**（仅 idle 态生效）；状态栏左侧改为**常驻显示当前权限模式（取代 provider 名）**；把会话/永久放行的规则写入交给引擎（经 agent 在 Loop 内应用，TUI 只回传用户选择）。
 - **cli（改造）**：用项目根（`Path.cwd().resolve()`）构造 `permission.Engine`、注入 tui。
 - **smoke（改造）**：非交互，以 `Mode.BYPASS` 运行（无法人在回路、避免阻塞在 Ask），构造一个根于 `cwd` 的引擎。
 
@@ -221,13 +221,13 @@ async def run(agent: Agent, conv: Conversation, mode: Mode) -> AsyncIterator[Age
 
 ### tui 模块
 ```python
-# 现有签名保持 (MewCodeApp,) 不变，仅末尾增 engine 形参：
+# 现有签名保持 (ForgeCodeApp,) 不变，仅末尾增 engine 形参：
 def new_app(
     providers: list[ProviderConfig],
     version: str,
     registry: ToolRegistry,
     engine: Engine,
-) -> MewCodeApp: ...
+) -> ForgeCodeApp: ...
 ```
 
 ## 模块设计
@@ -275,8 +275,8 @@ def new_app(
 ### tui 模块（app.py / stream.py / view.py；select.py 不动）
 **职责：** 新增待批准交互态；模式切换命令；状态栏模式徽标；全局取消覆盖 approving 态。
 **关键点：**
-- `MewCodeApp`：`mode: permission.Mode`（初值 `engine.start_mode()`）；加 `engine: Engine`、`pending: ApprovalRequest | None`。
-- `new_app(providers, version, registry, engine)`（保持返回 `MewCodeApp`）：存引擎、置初始模式。
+- `ForgeCodeApp`：`mode: permission.Mode`（初值 `engine.start_mode()`）；加 `engine: Engine`、`pending: ApprovalRequest | None`。
+- `new_app(providers, version, registry, engine)`（保持返回 `ForgeCodeApp`）：存引擎、置初始模式。
 - **全局按键分派**：`on_key` 顶部 `ctrl+c`/`esc` 的 `self.state == SessionState.STREAMING` 条件改为 `self.state in (SessionState.STREAMING, SessionState.APPROVING)`；在 approving 态触发取消时，先在 `self.pending.respond` 上 `set_result(Outcome.DENY_ONCE)`（兜底解开 agent 等待），再调 `self._cancel_turn()`。
 - 流式协程处理 `ApprovalRequest` 事件：保存 `self.pending = req`、切 `SessionState.APPROVING`，**仅暂停从事件队列读下一个事件**——agent 正在 await `respond`。
 - `update_approving`：维护光标 `approve_cursor`（0/1/2，进入 approving 态时重置为 0）；`up`/`k`、`down`/`j` 循环移动光标；`enter` 提交当前光标项；数字键 `1`/`2`/`3` 直选并提交；另 `y`=允许本次、`n`/`d`=拒绝本次 便捷键。索引→`Outcome` 由 `outcome_for_index` 显式映射（0=ALLOW_ONCE、1=ALLOW_FOREVER、2=DENY_ONCE）。选定后回 `SessionState.STREAMING`、清 `pending`，并 `self.pending_before_clear.respond.set_result(outcome)` 让 agent 续跑。

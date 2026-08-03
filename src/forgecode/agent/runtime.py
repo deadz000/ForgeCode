@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from forgecode.compact.state import (
     CompactCircuitBreaker,
@@ -34,6 +34,10 @@ class SessionRuntime:
     turn_count: int = 0
     # 已激活 Skill 列表
     active_skills: ActiveSkills | None = None
+    # Hook 注入的待装配 reminder（本轮取出后清空）
+    pending_reminders: list[str] = field(default_factory=list)
+    # Hook 引擎（由 App 注入，供 emit 与 only_once 重置）
+    hook_engine: object | None = None
     # asyncio 单线程，无需显式锁
 
 
@@ -48,10 +52,23 @@ def new_runtime(workspace: str = ".") -> SessionRuntime:
     )
 
 
+def append_reminders(self: SessionRuntime, prompts: list[str]) -> None:
+    """追加待注入的 hook prompt 到队列。"""
+    self.pending_reminders.extend(prompts)
+
+
+def take_reminders(self: SessionRuntime) -> list[str]:
+    """取出并清空待注入队列。"""
+    out = list(self.pending_reminders)
+    self.pending_reminders.clear()
+    return out
+
+
 def reset_for_new_session(self: SessionRuntime, ses_ctx: SessionContext) -> None:
     """原子重置 compact 子状态与计数器，将 session 指向新上下文。
 
     注意：context_window 保留不变；writer 与 conv 重建由调用方负责。
+    同时清空 pending_reminders 与 hook 引擎的 only_once 集合。
     """
     self.replacement = ContentReplacementState()
     self.recovery = RecoveryState()
@@ -60,9 +77,14 @@ def reset_for_new_session(self: SessionRuntime, ses_ctx: SessionContext) -> None
     self.usage_anchor = 0
     self.anchor_msg_len = 0
     self.turn_count = 0
+    self.pending_reminders.clear()
+    if self.hook_engine is not None:
+        self.hook_engine.reset_for_new_session()
     if self.active_skills is not None:
         self.active_skills.clear()
 
 
 # 将函数绑定为 SessionRuntime 的方法
+SessionRuntime.append_reminders = append_reminders  # type: ignore[attr-defined]
+SessionRuntime.take_reminders = take_reminders  # type: ignore[attr-defined]
 SessionRuntime.reset_for_new_session = reset_for_new_session  # type: ignore[attr-defined]

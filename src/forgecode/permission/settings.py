@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -68,18 +69,25 @@ def _parse_str_list(val: object) -> list[str]:
 
 
 def to_rule_set(s: Settings) -> RuleSet:
-    """将 Settings 转换为 RuleSet（跳过非法规则条目）。"""
+    """将 Settings 转换为 RuleSet。
+
+    失败的 rule 打印 stderr 后跳过，其余 rule 不受影响。
+    """
     rs = RuleSet()
     for entry in s.permissions.allow:
-        r, ok = parse_rule(entry)
-        if ok:
+        r, err = parse_rule(entry)
+        if r is not None:
             r.allow = True
             rs.allow.append(r)
+        else:
+            print(f"rule {entry!r} parse failed: {err}", file=sys.stderr)
     for entry in s.permissions.deny:
-        r, ok = parse_rule(entry)
-        if ok:
+        r, err = parse_rule(entry)
+        if r is not None:
             r.allow = False
             rs.deny.append(r)
+        else:
+            print(f"rule {entry!r} parse failed: {err}", file=sys.stderr)
     return rs
 
 

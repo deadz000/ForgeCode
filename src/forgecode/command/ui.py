@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from forgecode.conversation.history import Message
 from forgecode.permission import Mode
+
+if TYPE_CHECKING:
+    from forgecode.hook.rule import Rule
 
 
 @dataclass(frozen=True)
@@ -49,11 +52,15 @@ class UI(Protocol):
     def recent_messages(self, n: int) -> list[Message]: ...
     def all_messages(self) -> list[Message]: ...
 
+    # ── Hook 查询 ──
+    def hook_sources(self) -> list[str]: ...
+    def hook_rules(self) -> list[Rule]: ...
+
     # ── 影响界面动作 ──
     def quit(self) -> None: ...
     def force_compact(self) -> None: ...
     async def open_resume_menu(self) -> None: ...
-    def clear_and_new_session(self) -> None: ...
+    async def clear_and_new_session(self) -> None: ...
 
     # ── 状态查询 ──
     def idle(self) -> bool: ...
@@ -119,6 +126,12 @@ class NopUI:
     def all_messages(self) -> list[Message]:
         return []
 
+    def hook_sources(self) -> list[str]:
+        return []
+
+    def hook_rules(self) -> list:
+        return []
+
     def quit(self) -> None:
         pass
 
@@ -128,7 +141,7 @@ class NopUI:
     async def open_resume_menu(self) -> None:
         pass
 
-    def clear_and_new_session(self) -> None:
+    async def clear_and_new_session(self) -> None:
         pass
 
     def idle(self) -> bool:

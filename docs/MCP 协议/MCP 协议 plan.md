@@ -1,7 +1,7 @@
 # MCP 客户端 Plan> 技术栈：Python 3.12+；使用 **官方 SDK** `mcp`（`pip install mcp` / `uv add mcp`，import 名 `mcp`）承载协议层（JSON-RPC 编解码、`initialize` 握手、stdio 与 Streamable HTTP 传输）。本章新增 **`forgecode.mcp` 子包** 与入口装配，**不改 tool / agent / tui / permission / llm / config / conversation / prompt**。
 
 ## 架构概览- **`forgecode.mcp` 子包（新增）**：承载 MCP 客户端的全部职责——配置加载与两层合并、`${VAR}` 展开、字段校验、调用 SDK 建立 stdio / HTTP 会话、把远端工具适配成内置 `Tool` 协议、统一管理生命周期。仅依赖 `forgecode.tool`、SDK 与标准库；不依赖 agent / tui / permission / conversation。
-- **`forgecode.cli`（改造）**：在 `tool.default_registry()` 之后、`permission.PermissionEngine(...)` 与 `MewCodeApp(...).run()` 之前，加载 mcp 配置 → 启动 Manager → 把 Manager 产出的工具注册进 registry → 退出时 `await manager.close()`（包在 `try/finally` 中）。
+- **`forgecode.cli`（改造）**：在 `tool.default_registry()` 之后、`permission.PermissionEngine(...)` 与 `ForgeCodeApp(...).run()` 之前，加载 mcp 配置 → 启动 Manager → 把 Manager 产出的工具注册进 registry → 退出时 `await manager.close()`（包在 `try/finally` 中）。
 - **`forgecode.tool` 包（零改）**：`Registry.register` 与 `Tool` 协议本就是开放抽象，直接吃 `McpTool` 实例；`is_read_only` 对 MCP 工具返回正确值。
 - **agent / tui 包（零改）**：工具流转链路对工具来源透明。
 - **permission 包（零改）**：`friendly_name` 对未知名原样返回 → 规则可写 `mcp__<server>__<tool>`；`categorize` 在 `read_only==True` 时走 CategoryRead、否则归 CategoryExec → 模式兜底矩阵自然命中；`extract_target` 对未知工具返回 `("", False, False)`，黑名单与沙箱自动跳过。
@@ -208,7 +208,7 @@ async def _amain() -> int:
         for t in mcp_mgr.tools():
             registry.register(t)
         engine = PermissionEngine(root)
-        app = MewCodeApp(cfg.providers, registry=registry, engine=engine)
+        app = ForgeCodeApp(cfg.providers, registry=registry, engine=engine)
         await app.run_async()
     finally:
         await mcp_mgr.close()
@@ -281,7 +281,7 @@ cli._amain()
   │         └─ adapt_tool 包装成 McpTool
   ├─ for t in mgr.tools(): registry.register(t)
   ├─ PermissionEngine(root)
-  ├─ await MewCodeApp(...).run_async()
+  ├─ await ForgeCodeApp(...).run_async()
   └─ finally: await mgr.close()                    # AsyncExitStack.aclose() + 5s 兜底
 ```
 

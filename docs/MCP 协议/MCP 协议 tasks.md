@@ -169,7 +169,7 @@
    try:
        for t in mgr.tools():
            registry.register(t)
-       # 既有：构造 PermissionEngine、MewCodeApp，await app.run_async()
+       # 既有：构造 PermissionEngine、ForgeCodeApp，await app.run_async()
        ...
    finally:
        await mgr.close()

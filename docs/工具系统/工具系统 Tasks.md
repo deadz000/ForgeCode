@@ -17,7 +17,7 @@
 | 修改 | `src/forgecode/conversation.py` | add_assistant_with_tool_calls、add_tool_results |
 | 修改 | `src/forgecode/prompt.py` | SYSTEM_PROMPT 增 Agent 角色与工具约定 |
 | 修改 | `src/forgecode/tui/{app,stream,view}.py` | 接入 Agent.run、工具事件渲染、工具行/执行指示 |
-| 修改 | `src/forgecode/cli.py` | 构造 new_default_registry 注入 MewCodeApp |
+| 修改 | `src/forgecode/cli.py` | 构造 new_default_registry 注入 ForgeCodeApp |
 
 ---
 
@@ -159,14 +159,14 @@
 ## T15: prompt 系统提示词扩展**文件：** `src/forgecode/prompt.py`
 **依赖：** 无
 **步骤：**
-1. 扩写 `SYSTEM_PROMPT`：说明 MewCode 是能使用工具的 Agent，可读写改文件、执行命令、查找/搜索代码；需要信息或操作时调用相应工具，拿到结果后给出简洁答复。
+1. 扩写 `SYSTEM_PROMPT`：说明 ForgeCode 是能使用工具的 Agent，可读写改文件、执行命令、查找/搜索代码；需要信息或操作时调用相应工具，拿到结果后给出简洁答复。
 
 **验证：** `ruff check src/forgecode/prompt.py`；`pytest` 不回归。
 
 ## T16: tui 接入 agent + 工具行渲染**文件：** `src/forgecode/tui/app.py`、`src/forgecode/tui/stream.py`、`src/forgecode/tui/view.py`
 **依赖：** T14, T15
 **步骤：**
-1. `app.py`：`MewCodeApp.__init__(self, providers, version, registry)` 存 `self._registry: Registry`；新增成员 `self._cur_tool: ToolDisplay | None = None`（小 dataclass：`name: str, args: str`）。
+1. `app.py`：`ForgeCodeApp.__init__(self, providers, version, registry)` 存 `self._registry: Registry`；新增成员 `self._cur_tool: ToolDisplay | None = None`（小 dataclass：`name: str, args: str`）。
 2. `stream.py`：`submit` 走 `self._stream_task = asyncio.create_task(self._consume_agent_events())`（替换 T10 的临时 `_consume_stream`）；`_consume_agent_events` 内部 `agent = Agent(self.provider, self._registry)`；`async for ev in agent.run(self.conv):` 分派——
    - `ev.text`：`cur_reply += ev.text`；刷新动态区；
    - `ev.tool and ev.tool.phase == Phase.START`：若 `cur_reply` 非空，先 `RichLog.write(rich.markdown.Markdown(cur_reply))` 提交 preamble 并清空；置 `self._cur_tool = ToolDisplay(name, args)`；
@@ -180,7 +180,7 @@
 ## T17: cli 接线**文件：** `src/forgecode/cli.py`
 **依赖：** T16
 **步骤：**
-1. `from forgecode.tool import new_default_registry`；构造 `registry = new_default_registry()`；`MewCodeApp(cfg.providers, __version__, registry).run()`。
+1. `from forgecode.tool import new_default_registry`；构造 `registry = new_default_registry()`；`ForgeCodeApp(cfg.providers, __version__, registry).run()`。
 
 **验证：** `python -m forgecode` 在合法配置下能启动 TUI 并进入对话。
 

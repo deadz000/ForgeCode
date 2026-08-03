@@ -19,6 +19,8 @@ from forgecode.compact.state import new_session_context as _new_session_context
 from forgecode.config.loader import load_config
 from forgecode.config.schema import effective_context_window
 from forgecode.conversation.history import Conversation
+from forgecode.hook import load as load_hook
+from forgecode.hook.event import Event as HookEvent
 from forgecode.instructions import Loader
 from forgecode.mcp import load_config as load_mcp_config
 from forgecode.mcp import new_manager as new_mcp_manager
@@ -146,6 +148,9 @@ async def _amain(app_config, provider, conversation, registry, runtime) -> None:
         if err is not None:
             print(f"权限引擎降级: {err}", file=sys.stderr)
 
+        # ── Hook 引擎加载（错误一律 stderr，不阻断启动）──
+        hook_engine = load_hook(root)
+
         if runtime.active_skills is None:
             runtime.active_skills = ActiveSkills()
 
@@ -216,8 +221,24 @@ async def _amain(app_config, provider, conversation, registry, runtime) -> None:
             cmd_registry=cmd_reg,
             catalog=catalog,
             executor=executor,
+            hook_engine=hook_engine,
         )
-        await app.run_async()
+        app_finished = False
+        try:
+            await app.run_async()
+            app_finished = True
+        finally:
+            if hook_engine is not None and not app_finished:
+                # 兜底 SessionEnd（Ctrl+C / 异常路径未走到 run_async 末尾）
+                payload = {
+                    "event": "SessionEnd",
+                    "session_id": runtime.session.session_id
+                    if runtime and runtime.session
+                    else "",
+                    "cwd": os.getcwd(),
+                    "mode": app.mode.name.lower() if app.mode else "default",
+                }
+                await hook_engine.dispatch(HookEvent.SESSION_END, payload)
     finally:
         await mcp_mgr.close()
         writer.close()

@@ -20,6 +20,7 @@ from forgecode.command.builtin_ui import (
 )
 from forgecode.command.command import Command, Kind
 from forgecode.command.registry import Registry
+from forgecode.tui.hooks import handle_hooks
 
 
 def register_builtins(reg: Registry) -> None:
@@ -57,6 +58,12 @@ def register_builtins(reg: Registry) -> None:
             kind=Kind.LOCAL,
             handler=help_handler,
             aliases=["h", "?"],
+        ),
+        Command(
+            name="hooks",
+            description="列出已加载的 Hook 列表",
+            kind=Kind.LOCAL,
+            handler=handle_hooks,
         ),
         Command(
             name="memory",
