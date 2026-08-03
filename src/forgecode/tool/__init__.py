@@ -33,6 +33,7 @@ class Tool(Protocol):
     """统一工具抽象（F1）。"""
 
     read_only: bool  # True=只读（可并发执行 & Plan Mode 放行）
+    is_system: bool = False  # True=系统工具（allowed_tools 白名单豁免）
 
     def name(self) -> str: ...
     def description(self) -> str: ...
@@ -88,6 +89,34 @@ class Registry:
 
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
+
+    def register_skill_tool(self, t: Tool) -> None:
+        """动态注册专属工具；同名工具静默覆盖。"""
+        name = t.name()
+        if name not in self._tools:
+            self._order.append(name)
+        self._tools[name] = t
+
+    def definitions_filtered(self, allowed: list[str]) -> list[ToolDefinition]:
+        """按白名单导出工具定义，系统工具始终可见。"""
+        allowed_set = set(allowed or [])
+        result: list[ToolDefinition] = []
+        for name in self._order:
+            tool = self._tools[name]
+            if name in allowed_set or getattr(tool, "is_system", False):
+                result.append(
+                    ToolDefinition(
+                        name=tool.name(),
+                        description=tool.description(),
+                        input_schema=tool.parameters(),
+                    )
+                )
+        return result
+
+    def is_system(self, name: str) -> bool:
+        """判断工具是否为系统工具。"""
+        t = self.get(name)
+        return t is not None and getattr(t, "is_system", False)
 
     def definitions(self) -> list[ToolDefinition]:
         """按注册顺序导出所有工具定义（F3）。"""

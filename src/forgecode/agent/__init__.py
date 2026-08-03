@@ -27,7 +27,13 @@ from forgecode.conversation.history import (
 )
 from forgecode.permission import Decision, Mode, Outcome
 from forgecode.permission.engine import Engine
-from forgecode.prompt import build_system_prompt, gather_environment, plan_reminder
+from forgecode.prompt import (
+    build_system_prompt,
+    gather_environment,
+    plan_reminder,
+    render_active_skills_block,
+    render_skills_catalog,
+)
 from forgecode.providers import (
     BaseProvider,
     PromptTooLongError,
@@ -127,6 +133,8 @@ class Agent:
         memory_manager: Any = None,  # memory.Manager | None
         instruction_text: str = "",
         memory_text: str = "",
+        catalog=None,
+        allowed_tools: list[str] | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -135,6 +143,8 @@ class Agent:
         self._memory_manager = memory_manager
         self._instruction_text = instruction_text
         self._memory_text = memory_text
+        self._catalog = catalog
+        self._allowed_tools = allowed_tools
 
         if runtime is None:
             from forgecode.agent.runtime import new_runtime
@@ -142,6 +152,14 @@ class Agent:
             runtime = new_runtime(".")
         self.runtime = runtime
         self._run_lock = asyncio.Lock()
+
+    def activate_skill(self, name: str, body: str) -> None:
+        if self.runtime is not None and self.runtime.active_skills is not None:
+            self.runtime.active_skills.activate(name, body)
+
+    def clear_active_skills(self) -> None:
+        if self.runtime is not None and self.runtime.active_skills is not None:
+            self.runtime.active_skills.clear()
 
     async def run(
         self,
@@ -165,7 +183,14 @@ class Agent:
     ) -> AsyncIterator[Event]:
         env = gather_environment(self._version, self._provider.config.model)
         env_text = env.render()
-        sys = build_system_prompt(self._instruction_text, self._memory_text)
+        if self.runtime is not None and self.runtime.active_skills is not None:
+            active_block = render_active_skills_block(self.runtime.active_skills.to_prompt_entries())
+            if active_block:
+                env_text += "\\n\\n" + active_block
+        catalog_text = ""
+        if self._catalog is not None:
+            catalog_text = render_skills_catalog(self._catalog.to_prompt_items())
+        sys = build_system_prompt(self._instruction_text, self._memory_text, catalog_text)
         unknown_run = 0
 
         for it in range(1, MAX_ITERATIONS + 1):
@@ -176,7 +201,9 @@ class Agent:
                 return
 
             # 本轮按 mode 选工具定义（同一份引用给 manage_context 和 stream）
-            if mode == Mode.PLAN:
+            if self._allowed_tools is not None:
+                defs = self._registry.definitions_filtered(self._allowed_tools)
+            elif mode == Mode.PLAN:
                 defs = self._registry.read_only_definitions()
             else:
                 defs = self._registry.definitions()
@@ -345,9 +372,8 @@ class Agent:
         recent_msgs = _extract_recent_turn(conv)
 
         # 条件：每 N 轮 或 检测到显式记忆请求关键词
-        should_update = (
-            self.runtime.turn_count % MEMORY_UPDATE_INTERVAL == 0
-            or _has_memory_signal(recent_msgs)
+        should_update = self.runtime.turn_count % MEMORY_UPDATE_INTERVAL == 0 or _has_memory_signal(
+            recent_msgs
         )
 
         if should_update:

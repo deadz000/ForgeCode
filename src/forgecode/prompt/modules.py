@@ -19,12 +19,11 @@ class Module:
     content: str
 
 
-def fixed_modules() -> list[Module]:
-    """返回七个固定模块，按优先级排列。
+PRIO_SKILLS_CATALOG = 90
 
-    身份(10) → 系统约束(20) → 任务模式(30) → 动作执行(40) →
-    工具使用(50) → 语气风格(60) → 文本输出(70)
-    """
+
+def fixed_modules() -> list[Module]:
+    """返回七个固定模块，按优先级排列。"""
     return [
         Module(
             name="身份",
@@ -110,18 +109,19 @@ def fixed_modules() -> list[Module]:
     ]
 
 
-def optional_modules(instructions: str = "", memory: str = "") -> list[Module]:
-    """返回三个可选模块，content 由参数填充。空字符串时对应模块在装配时被跳过。
-
-    自定义指令(80) → 已激活 Skill(90) → 长期记忆(100)
-    """
+def optional_modules(instructions: str = "", memory: str = "", skills_catalog: str = "") -> list[Module]:
+    """返回三个可选模块，content 由参数填充。空字符串时对应模块在装配时被跳过。"""
     return [
         Module(
             name="自定义指令",
             priority=80,
             content=instructions or "",
         ),
-        Module(name="已激活 Skill", priority=90, content=""),
+        Module(
+            name="skills-catalog",
+            priority=PRIO_SKILLS_CATALOG,
+            content=skills_catalog or "",
+        ),
         Module(
             name="长期记忆",
             priority=100,

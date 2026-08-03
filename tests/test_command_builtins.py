@@ -20,8 +20,18 @@ def test_register_builtins_all_registered():
     visible = reg.visible()
     names = [c.name for c in visible]
     expected = [
-        "clear", "compact", "do", "exit", "help", "memory",
-        "permission", "plan", "resume", "review", "session", "status",
+        "clear",
+        "compact",
+        "do",
+        "exit",
+        "help",
+        "memory",
+        "permission",
+        "plan",
+        "resume",
+        "session",
+        "skill",
+        "status",
     ]
     assert len(visible) == 12
     assert names == expected
@@ -130,8 +140,18 @@ async def test_help_handler_output():
     await help_cmd.handler(ui)
     output = ui.printed[0] if ui.printed else ""
     expected_names = [
-        "clear", "compact", "do", "exit", "help", "memory",
-        "permission", "plan", "resume", "review", "session", "status",
+        "clear",
+        "compact",
+        "do",
+        "exit",
+        "help",
+        "memory",
+        "permission",
+        "plan",
+        "resume",
+        "session",
+        "skill",
+        "status",
     ]
     for name in expected_names:
         assert f"/{name}" in output, f"Missing /{name} in help output"

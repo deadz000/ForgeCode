@@ -11,7 +11,7 @@ import asyncio
 import os
 import sys
 
-import httpx2
+import httpx
 import mcp.types as mtypes
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -19,6 +19,8 @@ from mcp.client.streamable_http import streamable_http_client
 
 from forgecode.mcp.config import Config, ServerConfig
 from forgecode.mcp.tool import McpTool, adapt_tool
+import logging
+logger = logging.getLogger(__name__)
 
 # ── 超时常量（非常量，便于单测 monkeypatch）────────
 
@@ -54,10 +56,7 @@ class Manager:
                 timeout=close_timeout,
             )
         except TimeoutError:
-            print(
-                f"[mcp] warn: close timeout ({close_timeout}s), some sessions may leak",
-                file=sys.stderr,
-            )
+            logger.warning(f"mcp close timeout ({close_timeout}s), some sessions may leak")
 
 
 # ── 工厂函数 ──────────────────────────────────────
@@ -97,10 +96,7 @@ async def _run_connection(mgr: Manager, name: str, srv: ServerConfig, version: s
                 mgr._registry.register(t)  # type: ignore[union-attr]
             except ValueError:
                 pass  # 同名工具已存在则跳过
-    print(
-        f"[mcp] server {name} ready: {len(adapted)} tool(s)",
-        file=sys.stderr,
-    )
+        logger.info(f"mcp server {name} ready: {len(adapted)} tool(s)")
 
     # 阻塞等待关闭信号——用 try/finally 保证清理
     try:
@@ -120,12 +116,9 @@ async def _connect_and_init(
             timeout=connect_timeout,
         )
     except TimeoutError:
-        print(
-            f"[mcp] warn: connect server {name} timeout after {connect_timeout}s",
-            file=sys.stderr,
-        )
+                logger.warning(f"mcp server {name} connect timeout after {connect_timeout}s")
     except Exception as e:
-        print(f"[mcp] warn: connect server {name} failed: {e}", file=sys.stderr)
+        logger.warning(f'mcp server {name} connect failed: {e}')
     return None, None, []
 
 
@@ -142,7 +135,7 @@ async def _do_connect_and_init(name: str, srv: ServerConfig, version: str) -> tu
         http_kwargs: dict = {}
         if srv.headers:
             http_kwargs["headers"] = srv.headers
-        http_client = httpx2.AsyncClient(**http_kwargs)
+        http_client = httpx.AsyncClient(**http_kwargs)
         transport_ctx = streamable_http_client(srv.url, http_client=http_client)
 
     # 进入 transport

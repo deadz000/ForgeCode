@@ -76,7 +76,7 @@ def test_optional_module_count():
     opt = optional_modules()
     assert len(opt) == 3
     assert all(m.content == "" for m in opt)
-    assert [m.name for m in opt] == ["自定义指令", "已激活 Skill", "长期记忆"]
+    assert [m.name for m in opt] == ["自定义指令", "skills-catalog", "长期记忆"]
 
 
 # ── T4.3: N1 缓存确定性 ────────────────────────────

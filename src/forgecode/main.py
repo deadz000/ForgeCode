@@ -10,6 +10,10 @@ from datetime import timedelta
 from pathlib import Path
 
 from forgecode.agent.runtime import SessionRuntime
+from forgecode.command import Registry as CmdRegistry
+from forgecode.command import register_builtins
+from forgecode.command.skills import register_skills_as_commands, remove_skill_commands
+from forgecode.command.ui import SkillSummary
 from forgecode.compact.state import CompactCircuitBreaker, ContentReplacementState, RecoveryState
 from forgecode.compact.state import new_session_context as _new_session_context
 from forgecode.config.loader import load_config
@@ -22,7 +26,10 @@ from forgecode.memory import Manager as MemoryManager
 from forgecode.permission.engine import new_engine
 from forgecode.providers import create_provider
 from forgecode.session import Writer, clean_expired
+from forgecode.skills import ActiveSkills, Catalog, Executor
 from forgecode.tool import new_default_registry
+from forgecode.tool.install_skill import InstallSkillTool
+from forgecode.tool.load_skill import LoadSkillTool
 from forgecode.tui.app import VERSION, ForgeApp
 
 
@@ -139,6 +146,61 @@ async def _amain(app_config, provider, conversation, registry, runtime) -> None:
         if err is not None:
             print(f"权限引擎降级: {err}", file=sys.stderr)
 
+        if runtime.active_skills is None:
+            runtime.active_skills = ActiveSkills()
+
+        catalog = Catalog.load(Path(root))
+        registry.register(LoadSkillTool(catalog, runtime.active_skills, registry))
+        install_tool = InstallSkillTool(catalog, Path(root))
+        registry.register(install_tool)
+
+        issues = catalog.validate_tools(registry)
+        for issue in issues:
+            print(
+                "[skills] error: skill "
+                f"{issue.skill_name}: allowed_tool "
+                f'"{issue.tool_name}" not registered, skipped',
+                file=sys.stderr,
+            )
+            catalog.remove(issue.skill_name)
+
+        cmd_reg = CmdRegistry()
+        register_builtins(cmd_reg)
+        for skill in catalog.list():
+            if cmd_reg.lookup(skill.meta.name) is not None:
+                print(
+                    f"[skills] warn: skip /{skill.meta.name}: conflict with builtin command",
+                    file=sys.stderr,
+                )
+                catalog.remove(skill.meta.name)
+
+        executor = Executor(
+            catalog=catalog,
+            active=runtime.active_skills,
+            registry=registry,
+            provider=provider,
+            engine=engine,
+            version=VERSION,
+            runtime=runtime,
+        )
+
+        summaries = [
+            SkillSummary(
+                name=s.meta.name,
+                description=s.meta.description,
+                source=str(s.source),
+                mode=s.meta.mode,
+            )
+            for s in catalog.list()
+        ]
+
+        def _reload_skill_commands() -> None:
+            remove_skill_commands(cmd_reg)
+            register_skills_as_commands(cmd_reg, summaries, executor)
+
+        install_tool._on_reloaded = _reload_skill_commands
+        register_skills_as_commands(cmd_reg, summaries, executor)
+
         app = ForgeApp(
             config=app_config,
             provider=provider,
@@ -151,6 +213,9 @@ async def _amain(app_config, provider, conversation, registry, runtime) -> None:
             instruction_text=instruction_text,
             memory_text=memory_text,
             sessions_dir=sessions_dir,
+            cmd_registry=cmd_reg,
+            catalog=catalog,
+            executor=executor,
         )
         await app.run_async()
     finally:

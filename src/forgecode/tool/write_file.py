@@ -11,6 +11,7 @@ class WriteFileTool:
     """写入内容到文件，父目录不存在时自动创建。"""
 
     read_only = False
+    is_system = False
 
     def name(self) -> str:
         return "write_file"

@@ -11,6 +11,7 @@ class EditFileTool:
     """在文件中做唯一匹配替换。"""
 
     read_only = False
+    is_system = False
 
     def name(self) -> str:
         return "edit_file"

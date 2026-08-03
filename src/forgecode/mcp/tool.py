@@ -42,6 +42,7 @@ class McpTool:
     _params: dict[str, Any]  # JSON Schema 透传
     read_only: bool
     caller: CallerSession
+    is_system: bool = False
 
     def name(self) -> str:
         return self.full_name

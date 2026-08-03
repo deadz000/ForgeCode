@@ -58,3 +58,11 @@ class Registry:
         if not p:
             return list(self._visible)
         return [c for c in self._visible if c.name.startswith(p)]
+
+    def remove_if(self, pred) -> None:
+        """按谓词删除命令（含别名与 visible 列表）。"""
+        removed = [c for c in self._by_name.values() if pred(c)]
+        for cmd in removed:
+            for key in [cmd.name] + list(cmd.aliases):
+                self._by_name.pop(key, None)
+        self._visible = [c for c in self._visible if not pred(c)]

@@ -9,6 +9,12 @@ from forgecode.prompt.reminder import (
     plan_reminder,
     system_reminder,
 )
+from forgecode.prompt.skills_block import (
+    ActiveSkillEntry,
+    SkillCatalogItem,
+    render_active_skills_block,
+    render_skills_catalog,
+)
 
 
 def assemble_system(mods: list[Module]) -> str:
@@ -18,25 +24,23 @@ def assemble_system(mods: list[Module]) -> str:
     return "\n\n".join(non_empty)
 
 
-def build_system_prompt(instructions: str = "", memory: str = "") -> str:
-    """装配完整系统提示 = fixed_modules() + optional_modules(instructions, memory)。
+def build_system_prompt(instructions: str = "", memory: str = "", skills_catalog: str = "") -> str:
+    """装配完整系统提示 = fixed_modules() + optional_modules(instructions, memory, skills_catalog)。"""
+    return assemble_system(fixed_modules() + optional_modules(instructions, memory, skills_catalog))
 
-    非空 instructions 填入 custom-instructions 模块（priority 80）。
-    非空 memory 填入 long-term-memory 模块（priority 100）。
-    """
-    return assemble_system(fixed_modules() + optional_modules(instructions, memory))
-
-
-# ── 顶层导出 ────────────────────────────────────────
 
 __all__ = [
+    "ActiveSkillEntry",
     "Module",
+    "SkillCatalogItem",
     "fixed_modules",
     "optional_modules",
     "assemble_system",
     "build_system_prompt",
     "Environment",
     "gather_environment",
+    "render_active_skills_block",
+    "render_skills_catalog",
     "system_reminder",
     "plan_reminder",
     "EXECUTE_DIRECTIVE",

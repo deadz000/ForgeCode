@@ -11,6 +11,7 @@ class ReadFileTool:
     """读取文件内容，返回带行号的文本。"""
 
     read_only = True
+    is_system = False
 
     def name(self) -> str:
         return "read_file"

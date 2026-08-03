@@ -1,4 +1,4 @@
-"""TUI 主应用：终端界面渲染、输入处理、命令分发、Agent 集成。"""
+﻿"""TUI 主应用：终端界面渲染、输入处理、命令分发、Agent 集成。"""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from rich.text import Text
 from forgecode.agent import Agent, ApprovalRequest, CompactEvent, CompactPhase, Phase, ToolEvent
 from forgecode.command import Kind as CmdKind
 from forgecode.command import Registry as CmdRegistry
+from forgecode.command.ui import SkillSummary
 from forgecode.command import parse as parse_command
 from forgecode.command import register_builtins
 from forgecode.command.command import Command as CmdCommand
@@ -34,13 +35,16 @@ from forgecode.providers import BaseProvider, create_provider
 from forgecode.tool import Registry
 from forgecode.tui.complete import SlashCompleter
 
-# ── ASCII 小狗 ────────────────────────────────────
+# ── FORGECODE pixel banner ──
 
-ASCII_DOG = r"""
-   /\___/\
-  (  o o  )
-  (  =^=  )
-   (______)"""
+FORGECODE_ART = r"""
+   ███████╗ ██████╗ ██████╗  ██████╗ ███████╗ ██████╗ ██████╗ ██████╗ ███████╗
+   ██╔════╝██╔═══██╗██╔══██╗██╔════╝ ██╔════╝██╔════╝██╔═══██╗██╔══██╗██╔════╝
+   █████╗  ██║   ██║██████╔╝██║  ███╗█████╗  ██║     ██║   ██║██║  ██║█████╗  
+   ██╔══╝  ██║   ██║██╔══██╗██║   ██║██╔══╝  ██║     ██║   ██║██║  ██║██╔══╝  
+   ██║     ╚██████╔╝██║  ██║╚██████╔╝███████╗╚██████╗╚██████╔╝██████╔╝███████╗
+   ╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝ ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝
+"""
 
 VERSION = "0.2.0"
 
@@ -73,6 +77,9 @@ class ForgeApp:
         instruction_text: str = "",
         memory_text: str = "",
         sessions_dir: str = "",
+        cmd_registry=None,
+        catalog=None,
+        executor=None,
     ) -> None:
         self.config = config
         self.provider = provider
@@ -101,6 +108,8 @@ class ForgeApp:
         self._instruction_text: str = instruction_text
         self._memory_text: str = memory_text
         self._sessions_dir: str = sessions_dir
+        self.catalog = catalog
+        self.executor = executor
         # 是否在 Agent 运行中（/resume 互斥）
         self._agent_running: bool = False
         # 命令系统
@@ -109,8 +118,9 @@ class ForgeApp:
         self._current_slash_args: str = ""
 
         # 构造命令注册中心
-        reg = CmdRegistry()
-        register_builtins(reg)
+        reg = cmd_registry if cmd_registry is not None else CmdRegistry()
+        if cmd_registry is None:
+            register_builtins(reg)
         # 注册 4 条隐藏命令（全部走注册中心，无遗留分支）
         reg.register(
             CmdCommand(
@@ -165,6 +175,7 @@ class ForgeApp:
                 memory_manager=self._mem_mgr,
                 instruction_text=self._instruction_text,
                 memory_text=self._memory_text,
+                catalog=self.catalog,
             )
         return self._agent
 
@@ -192,6 +203,29 @@ class ForgeApp:
     def set_mode(self, m: Mode) -> None:
         """设置权限模式。"""
         self.mode = m
+
+
+    def list_catalog_skills(self) -> list:
+        if self.catalog is None:
+            return []
+        return [
+            SkillSummary(
+                name=s.meta.name,
+                description=s.meta.description,
+                source=str(s.source),
+                mode=s.meta.mode,
+            )
+            for s in self.catalog.list()
+        ]
+
+    def list_active_skills(self) -> list[str]:
+        if self.runtime is None or self.runtime.active_skills is None:
+            return []
+        return self.runtime.active_skills.names()
+
+    def clear_active_skills(self) -> None:
+        if self.runtime is not None and self.runtime.active_skills is not None:
+            self.runtime.active_skills.clear()
 
     def inject_and_send(self, display_label: str, preset_prompt: str) -> None:
         """向对话注入一条 user 消息并立即触发 Agent 回合。"""
@@ -336,7 +370,7 @@ class ForgeApp:
 
             try:
                 user_input = await session.prompt_async(
-                    message=[("class:prompt", "❯ ")],
+                    message=[("class:prompt", "")],
                     placeholder="Send a message...",
                     bottom_toolbar=self._status_bar,
                 )
@@ -358,6 +392,7 @@ class ForgeApp:
             user_input = user_input.strip()
             if not user_input:
                 continue
+            self.console.print(Rule(style="dim"))
 
             if await self.dispatch_slash(user_input):
                 continue
@@ -560,7 +595,7 @@ class ForgeApp:
         self._agent_running = True
 
         self.console.print()
-        self.console.print(f"[bold cyan]👤 你:[/bold cyan] {text}")
+        self.console.print(f"[bold cyan]user:[/bold cyan] {text}")
 
         # 启动实时计时器
         timer_task = asyncio.create_task(self._show_imagining())
@@ -625,6 +660,8 @@ class ForgeApp:
                     thinking_shown_header = False
                     if cur_text.strip():
                         self.console.print()
+                        self.console.print(Rule(style="dim"))
+                        self.console.print(Markdown(cur_text))
                         cur_text = ""
 
                     if ev.tool.phase == Phase.START:
@@ -645,24 +682,31 @@ class ForgeApp:
                     self._response_elapsed = time.time() - self._response_start
                     if cur_text.strip():
                         self.console.print()
+                        self.console.print(Rule(style="dim"))
                         self.console.print(Markdown(cur_text))
 
                 elif ev.err:
                     self._on_first_content(timer_task, first_content)
                     if cur_text.strip():
                         self.console.print()
+                        self.console.print(Rule(style="dim"))
+                        self.console.print(Markdown(cur_text))
                     self.console.print(f"[red]✕ {ev.err}[/red]")
 
         except asyncio.CancelledError:
             timer_task.cancel()
             if cur_text.strip():
-                self.console.print(cur_text)
+                self.console.print()
+                self.console.print(Rule(style="dim"))
+                self.console.print(Markdown(cur_text))
             self.console.print()
             self.console.print("[dim]已中断[/dim]")
         except Exception as e:
             timer_task.cancel()
             if cur_text.strip():
-                self.console.print(cur_text)
+                self.console.print()
+                self.console.print(Rule(style="dim"))
+                self.console.print(Markdown(cur_text))
             self.console.print(f"[red]✕ 对话出错: {e}[/red]")
 
         timer_task.cancel()
@@ -770,13 +814,13 @@ class ForgeApp:
             cwd = "~" + cwd[len(home) :]
 
         self.console.print()
-        self.console.print(f"[bold blue]{ASCII_DOG}[/bold blue]")
-        self.console.print(f"  [bold]ForgeCode[/bold] [dim]v{VERSION}[/dim]    {cwd}")
+        self.console.print(f"[bold]{FORGECODE_ART}[/bold]")
+        self.console.print(f"  [bold]⚒[/bold] [bold]ForgeCode[/bold] [dim]v{VERSION}[/dim]    {cwd}")
 
-        # MCP 连接状态
-        mcp_line = self._mcp_summary()
-        if mcp_line:
-            self.console.print(f"  [dim]{mcp_line}[/dim]")
+        # MCP 连接状态（移至底部状态栏）
+        # mcp_line = self._mcp_summary()
+        # if mcp_line:
+        #     self.console.print(f'  [dim]{mcp_line}[/dim]')
 
         self.console.print()
         self.console.print("[dim]就绪 - 输入消息开始对话，/help 查看命令[/dim]")
@@ -815,7 +859,9 @@ class ForgeApp:
         else:
             elapsed = "..."
 
-        bar = f" {mode_label} │ {model_name} │ {tok_str} │ {elapsed} "
+        mcp_line = self._mcp_summary()
+        mcp_str = f" | {mcp_line}" if mcp_line else ""
+        bar = f" {mode_label} │ {model_name} │ {tok_str} │ {elapsed} " + mcp_str + " "
         return [("class:bottom-toolbar.text", bar)]
 
     def _active_model(self) -> str:

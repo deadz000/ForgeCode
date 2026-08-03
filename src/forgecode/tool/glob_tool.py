@@ -12,6 +12,7 @@ class GlobTool:
     """按 glob 模式匹配文件路径。"""
 
     read_only = True
+    is_system = False
 
     def name(self) -> str:
         return "glob"

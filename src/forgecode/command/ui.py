@@ -2,9 +2,19 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Protocol
 
+from forgecode.conversation.history import Message
 from forgecode.permission import Mode
+
+
+@dataclass(frozen=True)
+class SkillSummary:
+    name: str
+    description: str
+    source: str
+    mode: str
 
 
 class UI(Protocol):
@@ -15,7 +25,7 @@ class UI(Protocol):
     def error(self, msg: str) -> None: ...
 
     # ── 模式 ──
-    def get_mode(self) -> Mode: ...  # 注意：名为 get_mode 以避免与 ForgeApp.mode 属性冲突
+    def get_mode(self) -> Mode: ...
     def set_mode(self, m: Mode) -> None: ...
 
     # ── 对话注入（KindPrompt 命令使用）──
@@ -30,6 +40,14 @@ class UI(Protocol):
     def memory_files(self) -> list[str]: ...
     def session_path(self) -> str: ...
     def session_id(self) -> str: ...
+
+    # ── Skill 查询与操作 ──
+    def list_catalog_skills(self) -> list[SkillSummary]: ...
+    def list_active_skills(self) -> list[str]: ...
+    def clear_active_skills(self) -> None: ...
+    async def append_assistant_message(self, text: str) -> None: ...
+    def recent_messages(self, n: int) -> list[Message]: ...
+    def all_messages(self) -> list[Message]: ...
 
     # ── 影响界面动作 ──
     def quit(self) -> None: ...
@@ -82,6 +100,24 @@ class NopUI:
 
     def session_id(self) -> str:
         return ""
+
+    def list_catalog_skills(self) -> list[SkillSummary]:
+        return []
+
+    def list_active_skills(self) -> list[str]:
+        return []
+
+    def clear_active_skills(self) -> None:
+        pass
+
+    async def append_assistant_message(self, text: str) -> None:
+        pass
+
+    def recent_messages(self, n: int) -> list[Message]:
+        return []
+
+    def all_messages(self) -> list[Message]:
+        return []
 
     def quit(self) -> None:
         pass

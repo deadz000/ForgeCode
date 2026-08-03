@@ -1,4 +1,4 @@
-"""内置命令注册：register_builtins(reg) 一次性注入 12 条 spec 命令。"""
+"""内置命令注册：register_builtins(reg) 一次性注入内置命令（含 /skill）。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,8 @@ from forgecode.command.builtin_local import (
     handle_status,
     make_help_handler,
 )
-from forgecode.command.builtin_prompt import handle_do, handle_review
+from forgecode.command.builtin_prompt import handle_do
+from forgecode.command.builtin_skill import handle_skill
 from forgecode.command.builtin_ui import (
     handle_clear,
     handle_compact,
@@ -86,13 +87,6 @@ def register_builtins(reg: Registry) -> None:
             aliases=["res"],
         ),
         Command(
-            name="review",
-            description="触发代码审查",
-            kind=Kind.PROMPT,
-            handler=handle_review,
-            aliases=["rev"],
-        ),
-        Command(
             name="session",
             description="查看当前会话信息",
             kind=Kind.LOCAL,
@@ -105,6 +99,12 @@ def register_builtins(reg: Registry) -> None:
             kind=Kind.LOCAL,
             handler=handle_status,
             aliases=["st"],
+        ),
+        Command(
+            name="skill",
+            description="列出已加载的 Skill",
+            kind=Kind.LOCAL,
+            handler=handle_skill,
         ),
     ]
 

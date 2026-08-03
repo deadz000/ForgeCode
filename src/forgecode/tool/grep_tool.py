@@ -13,6 +13,7 @@ class GrepTool:
     """在文件中搜索匹配正则表达式的内容。"""
 
     read_only = True
+    is_system = False
 
     def name(self) -> str:
         return "grep"

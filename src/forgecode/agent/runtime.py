@@ -11,6 +11,7 @@ from forgecode.compact.state import (
     SessionContext,
     new_session_context,
 )
+from forgecode.skills.active import ActiveSkills
 
 
 @dataclass
@@ -31,6 +32,8 @@ class SessionRuntime:
     anchor_msg_len: int = 0
     # 记忆更新：从首次 run 开始累计的自然完成轮数
     turn_count: int = 0
+    # 已激活 Skill 列表
+    active_skills: ActiveSkills | None = None
     # asyncio 单线程，无需显式锁
 
 
@@ -41,6 +44,7 @@ def new_runtime(workspace: str = ".") -> SessionRuntime:
         recovery=RecoveryState(),
         auto_tracking=CompactCircuitBreaker(),
         session=new_session_context(workspace),
+        active_skills=ActiveSkills(),
     )
 
 
@@ -56,6 +60,8 @@ def reset_for_new_session(self: SessionRuntime, ses_ctx: SessionContext) -> None
     self.usage_anchor = 0
     self.anchor_msg_len = 0
     self.turn_count = 0
+    if self.active_skills is not None:
+        self.active_skills.clear()
 
 
 # 将函数绑定为 SessionRuntime 的方法
