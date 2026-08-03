@@ -5,9 +5,7 @@ from __future__ import annotations
 import asyncio
 import warnings
 from dataclasses import replace
-from pathlib import Path
 
-from forgecode.permission import Mode
 from forgecode.skills.parser import _parse_frontmatter_and_body
 from forgecode.skills.render import render_body
 from forgecode.skills.types import Skill
@@ -62,40 +60,27 @@ class Executor:
     async def _run_fork(self, ui, skill: Skill, rendered: str) -> str:
         conv = _make_fork_conversation(ui, rendered, skill.meta.fork_context)
         provider = _fork_provider(self._provider, skill)
-        sub_in = 0
-        sub_out = 0
-        stream_text = ""
 
-        from forgecode.agent import Agent
-        from forgecode.agent.runtime import new_runtime
-
-        fork_runtime = new_runtime(str(Path.cwd()))
-        fork_agent = Agent(
-            provider,
-            self._registry,
-            self._engine,
-            self._version,
-            runtime=fork_runtime,
-            allowed_tools=skill.meta.allowed_tools or None,
-        )
+        # 复用 SubAgent 底座（AC17）：装饰参数后调公共 launch_fork
+        from forgecode.agent.launch import launch_fork
 
         try:
-            async for ev in fork_agent.run(conv, Mode.DEFAULT):
-                if ev.usage is not None:
-                    sub_in += ev.usage.input_tokens
-                    sub_out += ev.usage.output_tokens
-                if ev.text:
-                    stream_text += ev.text
-            final_text = _last_assistant_text(conv) or stream_text
+            final_text = await launch_fork(
+                provider=provider,
+                registry=self._registry,
+                engine=self._engine,
+                version=self._version,
+                conv=conv,
+                task="",  # conv 已由 _make_fork_conversation 装填任务
+                allowed_tools=skill.meta.allowed_tools or None,
+                hook_engine=None,
+            )
             if not final_text:
                 final_text = f"[skill {skill.meta.name} finished with no output]"
         except asyncio.CancelledError:
             final_text = f"[skill {skill.meta.name} failed: cancelled]"
         except Exception as e:
             final_text = f"[skill {skill.meta.name} failed: {e}]"
-
-        if self._runtime is not None:
-            self._runtime.usage_anchor += sub_in + sub_out
         return final_text
 
 
@@ -136,10 +121,3 @@ def _fork_provider(provider, skill: Skill):
     except Exception as e:
         warnings.warn(f"skill {skill.meta.name}: model override failed, use main provider: {e}", stacklevel=3)
         return provider
-
-
-def _last_assistant_text(conv) -> str:
-    for msg in reversed(conv.messages):
-        if msg.role == "assistant" and msg.content and not msg.tool_calls:
-            return msg.content
-    return ""

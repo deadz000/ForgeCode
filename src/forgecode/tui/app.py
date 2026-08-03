@@ -84,6 +84,8 @@ class ForgeApp:
         catalog=None,
         executor=None,
         hook_engine: HookEngine | None = None,
+        task_mgr=None,
+        subagent_catalog=None,
     ) -> None:
         self.config = config
         self.provider = provider
@@ -117,6 +119,10 @@ class ForgeApp:
         self._sessions_dir: str = sessions_dir
         self.catalog = catalog
         self.executor = executor
+        self.task_mgr = task_mgr
+        self.subagent_catalog = subagent_catalog
+        # 后台任务通知消费协程（run_async 启动）
+        self._consume_task = None
         # 是否在 Agent 运行中（/resume 互斥）
         self._agent_running: bool = False
         # 命令系统
@@ -185,6 +191,11 @@ class ForgeApp:
                 catalog=self.catalog,
                 hook_engine=self.hook_engine,
             )
+            # 把 Agent 工具绑定到主 Agent（parent 反推 + 父对话获取）
+            agent_tool = self.registry.get("Agent")
+            if agent_tool is not None and hasattr(agent_tool, "set_parent"):
+                agent_tool.set_parent(self._agent)
+                agent_tool.bind_conv_source(lambda: self.conversation)
         return self._agent
 
     def refresh_memory_text(self) -> None:
@@ -234,6 +245,36 @@ class ForgeApp:
     def clear_active_skills(self) -> None:
         if self.runtime is not None and self.runtime.active_skills is not None:
             self.runtime.active_skills.clear()
+
+    # ── Skill fork 需要（UI Protocol 缺失补齐）──
+
+    async def append_assistant_message(self, text: str) -> None:
+        """把 skill fork 结果作为 assistant 消息写回主对话。"""
+        self.conversation.add_assistant(text)
+        self.console.print(Markdown(text))
+
+    def recent_messages(self, n: int) -> list:
+        return self.conversation.messages[-n:]
+
+    def all_messages(self) -> list:
+        return self.conversation.messages
+
+    # ── 后台任务通知 ──────────────────────────────
+
+    async def _consume_task_done(self) -> None:
+        """消费 task_mgr 的 done 队列，把 <task-notification> 注入 pending_reminders。"""
+        if self.task_mgr is None or self.runtime is None:
+            return
+        from forgecode.tui.tasks import build_task_notification
+
+        q = self.task_mgr.subscribe_done()
+        while True:
+            task_id = await q.get()
+            bt = self.task_mgr.get(task_id)
+            if bt is None:
+                continue
+            notif = build_task_notification(bt)
+            self.runtime.append_reminders([notif])
 
     def inject_and_send(self, display_label: str, preset_prompt: str) -> None:
         """向对话注入一条 user 消息并立即触发 Agent 回合。"""
@@ -423,6 +464,8 @@ class ForgeApp:
         """异步主循环。"""
         self._render_banner()
         await self._dispatch_session_start()
+        if self.task_mgr is not None:
+            self._consume_task = asyncio.create_task(self._consume_task_done())
 
         history = InMemoryHistory()
         session: PromptSession[str] = PromptSession(
@@ -470,6 +513,8 @@ class ForgeApp:
                     self.console.print("[dim]已中断[/dim]")
 
         await self._dispatch_session_end()
+        if self._consume_task is not None:
+            self._consume_task.cancel()
 
     # ── 命令分发 ──────────────────────────────────
 

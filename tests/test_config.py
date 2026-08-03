@@ -32,6 +32,17 @@ def test_app_config():
     assert cfg.active_provider_name == "p1"
 
 
+def test_enable_subagent_background_default_true():
+    cfg = AppConfig(providers=[], active_provider_name="p")
+    assert cfg.enable_subagent_background is None
+    assert cfg.effective_enable_subagent_background() is True
+
+
+def test_enable_subagent_background_override():
+    cfg = AppConfig(providers=[], active_provider_name="p", enable_subagent_background=False)
+    assert cfg.effective_enable_subagent_background() is False
+
+
 def test_parse_providers_valid():
     data = {
         "providers": [

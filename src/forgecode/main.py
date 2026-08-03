@@ -9,6 +9,7 @@ import sys
 from datetime import timedelta
 from pathlib import Path
 
+from forgecode.agent.agent_tool import AgentTool
 from forgecode.agent.runtime import SessionRuntime
 from forgecode.command import Registry as CmdRegistry
 from forgecode.command import register_builtins
@@ -29,6 +30,16 @@ from forgecode.permission.engine import new_engine
 from forgecode.providers import create_provider
 from forgecode.session import Writer, clean_expired
 from forgecode.skills import ActiveSkills, Catalog, Executor
+from forgecode.subagent import load_catalog as load_subagent_catalog
+from forgecode.task import (
+    Manager as TaskManager,
+)
+from forgecode.task import (
+    SendMessageTool,
+    TaskGetTool,
+    TaskListTool,
+    TaskStopTool,
+)
 from forgecode.tool import new_default_registry
 from forgecode.tool.install_skill import InstallSkillTool
 from forgecode.tool.load_skill import LoadSkillTool
@@ -151,6 +162,22 @@ async def _amain(app_config, provider, conversation, registry, runtime) -> None:
         # ── Hook 引擎加载（错误一律 stderr，不阻断启动）──
         hook_engine = load_hook(root)
 
+        # ── SubAgent：角色 Catalog + 后台任务 Manager + 5 个新工具 ──
+        subagent_catalog = load_subagent_catalog(root)
+        task_mgr = TaskManager()
+        registry.register(TaskListTool(task_mgr))
+        registry.register(TaskGetTool(task_mgr))
+        registry.register(TaskStopTool(task_mgr))
+        registry.register(SendMessageTool(task_mgr))
+        registry.register(
+            AgentTool(
+                subagent_catalog,
+                task_mgr,
+                parent=None,
+                bg_enabled=app_config.effective_enable_subagent_background(),
+            )
+        )
+
         if runtime.active_skills is None:
             runtime.active_skills = ActiveSkills()
 
@@ -222,6 +249,8 @@ async def _amain(app_config, provider, conversation, registry, runtime) -> None:
             catalog=catalog,
             executor=executor,
             hook_engine=hook_engine,
+            task_mgr=task_mgr,
+            subagent_catalog=subagent_catalog,
         )
         app_finished = False
         try:

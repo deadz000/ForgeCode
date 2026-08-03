@@ -103,4 +103,15 @@ def load_config(provider_name: str | None = None) -> AppConfig:
             raise ValueError(f"未找到供应商 '{provider_name}'，可用: {names}")
         active_name = matching[0].name
 
-    return AppConfig(providers=providers, active_provider_name=active_name)
+    # 顶层开关：项目级优先，其次全局
+    bg = None
+    for data in (project_data, global_data):
+        if data is not None and "enableSubAgentBackground" in data:
+            bg = bool(data["enableSubAgentBackground"])
+            break
+
+    return AppConfig(
+        providers=providers,
+        active_provider_name=active_name,
+        enable_subagent_background=bg,
+    )

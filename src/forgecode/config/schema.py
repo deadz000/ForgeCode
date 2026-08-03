@@ -41,3 +41,11 @@ class AppConfig:
 
     providers: list[ProviderConfig]
     active_provider_name: str
+    # SubAgent 后台能力开关（YAML key: enableSubAgentBackground）。None=默认开启
+    enable_subagent_background: bool | None = None
+
+    def effective_enable_subagent_background(self) -> bool:
+        """返回是否启用后台：None 视为 True（N6）。"""
+        if self.enable_subagent_background is None:
+            return True
+        return self.enable_subagent_background

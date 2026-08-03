@@ -141,6 +141,11 @@ class Agent:
         catalog=None,
         allowed_tools: list[str] | None = None,
         hook_engine: HookEngine | None = None,
+        system_prompt: str | None = None,
+        max_turns: int = 0,
+        permission_mode: Mode | None = None,
+        dont_ask: bool = False,
+        approval_upgrader=None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -152,6 +157,11 @@ class Agent:
         self._catalog = catalog
         self._allowed_tools = allowed_tools
         self._hook_engine = hook_engine
+        self.system_prompt = system_prompt
+        self.max_turns = max_turns
+        self.permission_mode = permission_mode
+        self.dont_ask = dont_ask
+        self.approval_upgrader = approval_upgrader
 
         if runtime is None:
             from forgecode.agent.runtime import new_runtime
@@ -232,9 +242,13 @@ class Agent:
         if self._catalog is not None:
             catalog_text = render_skills_catalog(self._catalog.to_prompt_items())
         sys = build_system_prompt(self._instruction_text, self._memory_text, catalog_text)
+        if self.system_prompt:
+            # 子 Agent：角色定义正文覆盖默认系统提示
+            sys = self.system_prompt
         unknown_run = 0
 
-        for it in range(1, MAX_ITERATIONS + 1):
+        limit = self.max_turns or MAX_ITERATIONS
+        for it in range(1, limit + 1):
             yield Event(iter=it)
 
             if cancel.is_set():
@@ -428,6 +442,8 @@ class Agent:
                 self.runtime,
                 batched_result,
                 self._hook_engine,
+                dont_ask=self.dont_ask,
+                approval_upgrader=self.approval_upgrader,
             ):
                 yield ev
 
@@ -655,8 +671,13 @@ async def _execute_batched(
     runtime: Any,
     result: dict[str, Any],
     hook_engine: HookEngine | None = None,
+    dont_ask: bool = False,
+    approval_upgrader=None,
 ) -> AsyncIterator[Event]:
-    """保序分批并发执行，每工具前走 PreToolUse hook + 权限判定，ReadFile 成功后写 recovery。"""
+    """保序分批并发执行，每工具前走 PreToolUse hook + 权限判定，ReadFile 成功后写 recovery。
+
+    dont_ask / approval_upgrader 供子 Agent 权限链使用（spec F12/F13）。
+    """
     results: list[ToolResult | None] = [None] * len(calls)
     i = 0
 
@@ -772,6 +793,37 @@ async def _execute_batched(
                     await _track_read_file(runtime, call, exec_result)
                 elif d == Decision.DENY:
                     results[i] = ToolResult(tool_call_id=call.id, content=reason, is_error=True)
+                elif dont_ask:
+                    # 子 Agent dontAsk 兜底：Ask 决策直接放行（黑名单/沙箱 DENY 已在上层拦截）
+                    exec_result = await registry.execute(call.name, call.input, timeout=DEFAULT_TIMEOUT)
+                    results[i] = ToolResult(
+                        tool_call_id=call.id, content=exec_result.content, is_error=exec_result.is_error
+                    )
+                    await _track_read_file(runtime, call, exec_result)
+                elif approval_upgrader is not None:
+                    # 子 Agent 升级到父 TUI / 直接弹窗审批（spec F12 第三层）
+                    req = ApprovalRequest(
+                        name=call.name,
+                        args=_args_preview(call.input),
+                        reason=reason,
+                        respond=asyncio.get_running_loop().create_future(),
+                    )
+                    outcome, ok = await approval_upgrader(req)
+                    if not ok or outcome == Outcome.DENY_ONCE:
+                        results[i] = ToolResult(tool_call_id=call.id, content=reason, is_error=True)
+                    else:
+                        if outcome == Outcome.ALLOW_FOREVER:
+                            try:
+                                from forgecode.permission.persist import persist_local_allow
+
+                                persist_local_allow(engine, call)
+                            except Exception:
+                                pass
+                        exec_result = await registry.execute(call.name, call.input, timeout=DEFAULT_TIMEOUT)
+                        results[i] = ToolResult(
+                            tool_call_id=call.id, content=exec_result.content, is_error=exec_result.is_error
+                        )
+                        await _track_read_file(runtime, call, exec_result)
                 else:  # ASK
                     await _dispatch_hook(
                         hook_engine,
@@ -996,3 +1048,16 @@ def _has_memory_signal(msgs: list[Any]) -> bool:
             if kw in text_lower:
                 return True
     return False
+
+
+# ── run_to_completion 绑定 ─────────────────────────
+
+
+def _bind_run_to_completion() -> None:
+    """把 run_to_completion 作为方法挂到 Agent 上（与 SessionRuntime 同模式）。"""
+    from forgecode.agent.run_to_completion import run_to_completion
+
+    Agent.run_to_completion = run_to_completion  # type: ignore[attr-defined]
+
+
+_bind_run_to_completion()
