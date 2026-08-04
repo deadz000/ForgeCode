@@ -10,9 +10,10 @@ import time
 from typing import Any
 
 from prompt_toolkit.application import Application, get_app
-from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import Dimension, HSplit, Layout, Window
+from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
+from prompt_toolkit.layout import Dimension, Float, FloatContainer, HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.shortcuts import prompt as pt_prompt
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import TextArea
@@ -143,6 +144,8 @@ class ForgeApp:
         self.cmd_registry: CmdRegistry | None = None
         self._slash_completer: SlashCompleter | None = None
         self._current_slash_args: str = ""
+        # 空闲态 Ctrl+C 计数器（两次退出）
+        self._idle_ctrl_c_count: int = 0
 
         # 构造命令注册中心
         reg = cmd_registry if cmd_registry is not None else CmdRegistry()
@@ -531,13 +534,54 @@ class ForgeApp:
             height=Dimension(min=1),
             prompt="> ",
         )
-        container = HSplit([top, self._input_textarea, bottom, status])
+        # CompletionsMenu 作为 float 挂到光标处：complete_while_typing 产生的候选
+        # 才有渲染载体（否则菜单从未显示）
+        container = FloatContainer(
+            HSplit([top, self._input_textarea, bottom, status]),
+            floats=[Float(xcursor=True, ycursor=True, content=CompletionsMenu())],
+        )
+
+        # 显式 key_bindings：
+        #   Tab → 补全弹出 / 导航
+        #   Shift-Tab → 循环切换权限模式
+        #   Esc → 关闭补全菜单
+        #   Ctrl+C → 抛 KeyboardInterrupt
+        kb = KeyBindings()
+
+        @kb.add("tab")
+        def _on_tab(event: KeyPressEvent) -> None:
+            buf = event.app.current_buffer
+            if buf.complete_state:
+                buf.complete_next()
+            else:
+                buf.start_completion(select_first=False)
+
+        @kb.add("s-tab")
+        def _on_stab(event: KeyPressEvent) -> None:
+            """Shift-Tab：循环切换权限模式（同 /permission）。"""
+            self.mode = Mode((int(self.mode) + 1) % 4)
+            # 更新状态栏以反映新模式
+            event.app.invalidate()
+
+        @kb.add("escape")
+        def _on_esc(event: KeyPressEvent) -> None:
+            buf = event.app.current_buffer
+            if buf.complete_state:
+                buf.cancel_completion()
+
+        @kb.add("c-c")
+        def _on_ctrl_c(event: KeyPressEvent) -> None:
+            # 标准退出方式：异常在 run_async() 返回处重新抛出。
+            # 直接 raise 会逃出 prompt_toolkit 的键处理链，导致 asyncio.run 崩溃。
+            event.app.exit(exception=KeyboardInterrupt())
+
         return Application(
             layout=Layout(container, focused_element=self._input_textarea),
             style=PROMPT_STYLE,
             full_screen=False,
             mouse_support=False,
             min_redraw_interval=0.05,
+            key_bindings=kb,
         )
 
     async def run_async(self) -> None:
@@ -554,14 +598,21 @@ class ForgeApp:
                 user_input = await input_app.run_async()
                 self._input_textarea.buffer.reset()
             except KeyboardInterrupt:
-                # 流式态 → 取消本轮；空闲态 → 退出
+                # 流式态 → 取消本轮
                 if self._turn_cancel is not None and not self._turn_cancel.is_set():
                     self._turn_cancel.set()
                     self.console.print()
                     self.console.print("[dim]正在取消...[/dim]")
                     continue
+                # 空闲态 → 第一次提示，第二次退出
+                self._idle_ctrl_c_count += 1
+                if self._idle_ctrl_c_count >= 2:
+                    self.console.print()
+                    self.console.print("[dim]再见！[/dim]")
+                    self._exit_flag = True
+                    continue
                 self.console.print()
-                self._exit_flag = True
+                self.console.print("[dim]Press Ctrl+C again to exit[/dim]")
                 continue
             except EOFError:
                 self.console.print()
@@ -571,6 +622,7 @@ class ForgeApp:
             user_input = (user_input or "").strip()
             if not user_input:
                 continue
+            self._idle_ctrl_c_count = 0  # 正常输入 → 重置 Ctrl+C 计数器
 
             if await self.dispatch_slash(user_input):
                 continue
@@ -579,6 +631,11 @@ class ForgeApp:
             except asyncio.CancelledError:
                 self.console.print()
                 self.console.print("[dim]已中断[/dim]")
+            except KeyboardInterrupt:
+                if self._turn_cancel is not None and not self._turn_cancel.is_set():
+                    self._turn_cancel.set()
+                self.console.print()
+                self.console.print("[dim]正在取消...[/dim]")
 
         await self._dispatch_session_end()
         if self._consume_task is not None:
@@ -888,19 +945,24 @@ class ForgeApp:
                     self.console.print(f"[red]✕ {ev.err}[/red]")
 
         except asyncio.CancelledError:
-            timer_task.cancel()
-            self._finalize_live(cur_text)
             self.console.print()
             self.console.print("[dim]已中断[/dim]")
+        except KeyboardInterrupt:
+            # 流式态 Ctrl+C：取消本轮（run_async 的 except 处理空闲态）
+            if self._turn_cancel is not None and not self._turn_cancel.is_set():
+                self._turn_cancel.set()
+            self.console.print()
+            self.console.print("[dim]正在取消...[/dim]")
         except Exception as e:
-            timer_task.cancel()
-            self._finalize_live(cur_text)
             self.console.print(f"[red]✕ 对话出错: {e}[/red]")
-
-        timer_task.cancel()
-        self._agent_running = False
-        self._finalize_live(cur_text)
-        self.console.print()
+        finally:
+            # 无论正常/异常/取消，完整清理——残留的 timer/agent_running/turn_cancel
+            # 会导致状态栏永远 Imagining、后续 Ctrl+C 全部误判为流式态
+            timer_task.cancel()
+            self._agent_running = False
+            self._turn_cancel = None
+            self._finalize_live(cur_text)
+            self.console.print()
 
     # ── 响应计时器 ────────────────────────────────
 

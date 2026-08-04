@@ -34,6 +34,7 @@ class AnthropicProvider(BaseProvider):
         self.client = AsyncAnthropic(
             base_url=config.base_url,
             api_key=config.api_key,
+            timeout=60.0,  # 60s 无响应即报错，避免 API 不通时无限挂起
         )
 
     def stream(self, req: Request) -> AsyncIterator[StreamEvent]:

@@ -128,7 +128,7 @@ async def test_missing_prompt() -> None:
     tool = _make_tool(MockCatalog([_explore_def()]), FakeTaskMgr(), _make_parent(FakeProvider()))
     result = await tool.execute(json.dumps({"description": "d"}))
     assert result.is_error
-    assert "prompt is required" in result.content
+    assert "缺少必填参数 prompt" in result.content
 
 
 @pytest.mark.asyncio

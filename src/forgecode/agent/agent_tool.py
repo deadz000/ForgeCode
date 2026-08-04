@@ -93,14 +93,20 @@ class AgentTool:
         return {
             "type": "object",
             "properties": {
-                "prompt": {"type": "string", "description": "交给子 Agent 的任务指令（必填）"},
-                "description": {"type": "string", "description": "一句话任务描述，供 UI 展示（必填）"},
+                "prompt": {
+                    "type": "string",
+                    "description": "【必填】交给子 Agent 的完整任务指令。把你要子 Agent 做的事写清楚",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "【可选】一句话任务摘要，供 UI 展示。不填则自动截取 prompt 前 80 字",
+                },
                 "subagent_type": {"type": "string", "description": "预定义角色名，留空走 Fork 路径"},
                 "model": {"type": "string", "description": "模型覆盖：haiku/sonnet/opus/inherit"},
                 "run_in_background": {"type": "boolean", "description": "true 时强制后台启动"},
                 "name": {"type": "string", "description": "给本次子 Agent 命名，供 SendMessage 使用"},
             },
-            "required": ["prompt", "description"],
+            "required": ["prompt"],
         }
 
     async def execute(self, args: str) -> Result:
@@ -122,9 +128,17 @@ class AgentTool:
             name=str(data.get("name", "")),
         )
         if not a_args.prompt:
-            return Result(content="prompt is required", is_error=True)
+            return Result(
+                content=(
+                    "缺少必填参数 prompt。请把要交给子 Agent 的完整任务指令写入 prompt 字段。"
+                    " 格式示例：{\"prompt\": \"统计 src/ 下所有 .py 文件行数\","
+                    " \"subagent_type\": \"Explore\"}"
+                ),
+                is_error=True,
+            )
         if not a_args.description:
-            return Result(content="description is required", is_error=True)
+            # 自动兜底：截取 prompt 首行前 80 字，避免 LLM 反复重试
+            a_args.description = a_args.prompt.strip().split("\n")[0][:80]
 
         # ── 嵌套阻断 ──
         if IN_SUBAGENT.get():
