@@ -16,7 +16,14 @@ from forgecode.conversation.history import (
     Message,
     ToolCall,
 )
-from forgecode.providers import BaseProvider, PromptTooLongError, Request, StreamEvent, Usage
+from forgecode.providers import (
+    BaseProvider,
+    PromptTooLongError,
+    Request,
+    StreamEvent,
+    Usage,
+    ensure_object_schema,
+)
 
 
 class AnthropicProvider(BaseProvider):
@@ -73,7 +80,7 @@ class AnthropicProvider(BaseProvider):
                 {
                     "name": t.name,
                     "description": t.description,
-                    "input_schema": t.input_schema,
+                    "input_schema": ensure_object_schema(t.input_schema),
                 }
                 for t in req.tools
             ]

@@ -4,19 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import sys
 import time
 from typing import Any
 
-from prompt_toolkit import PromptSession
-from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.application import Application, get_app
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout import Dimension, HSplit, Layout, Window
+from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.shortcuts import prompt as pt_prompt
 from prompt_toolkit.styles import Style
+from prompt_toolkit.widgets import TextArea
 from rich.console import Console
+from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.rule import Rule
 from rich.text import Text
 
 from forgecode.agent import Agent, ApprovalRequest, CompactEvent, CompactPhase, Phase, ToolEvent
@@ -57,8 +60,17 @@ PROMPT_STYLE = Style.from_dict(
     {
         "prompt": "bold #00ff87",
         "placeholder": "#555555",
-        "bottom-toolbar": "bg:#1a1a2e #888888",
-        "bottom-toolbar.text": "bg:#1a1a2e #cccccc",
+        # 补全菜单：黑底白字（当前项深蓝底白字高亮）
+        "completion-menu": "bg:#000000 fg:#ffffff",
+        "completion-menu.completion": "bg:#000000 fg:#ffffff",
+        "completion-menu.completion.current": "bg:#005f87 fg:#ffffff",
+        "completion-menu.meta": "bg:#000000 fg:#ffffff",
+        "completion-menu.meta.current": "bg:#005f87 fg:#ffffff",
+        # 输入框/边框/状态栏：黑底白字
+        "input": "bg:#000000 fg:#ffffff",
+        "input-border": "bg:#000000 fg:#ffffff",
+        "bottom-toolbar": "bg:#000000 fg:#ffffff",
+        "bottom-toolbar.text": "bg:#000000 fg:#ffffff",
     }
 )
 
@@ -97,6 +109,8 @@ class ForgeApp:
         if runtime is not None:
             runtime.hook_engine = hook_engine
         self.console = Console()
+        self._width = shutil.get_terminal_size().columns
+        self._turn_live: Live | None = None
         self._show_thinking: bool = False
         self._exit_flag: bool = False
         # Agent Loop 状态
@@ -251,7 +265,7 @@ class ForgeApp:
     async def append_assistant_message(self, text: str) -> None:
         """把 skill fork 结果作为 assistant 消息写回主对话。"""
         self.conversation.add_assistant(text)
-        self.console.print(Markdown(text))
+        self.console.print(self._render_markdown(text))
 
     def recent_messages(self, n: int) -> list:
         return self.conversation.messages[-n:]
@@ -460,30 +474,85 @@ class ForgeApp:
         """同步入口。"""
         asyncio.run(self.run_async())
 
+    def _render_status_text(self) -> str:
+        """状态行文本（黑底白字，尾随输入框底部）。"""
+        model_name = self._active_model()
+        mode_label = self.mode.label()
+        it = self._total_input_tokens
+        ot = self._total_output_tokens
+        tok_str = f"↑{_fmt_tok(it)} ↓{_fmt_tok(ot)}"
+        if self._agent_running:
+            elapsed = f"Imagining… ({time.time() - self._response_start:.0f}s)"
+            if self._iter > 0:
+                elapsed += f" · 第{self._iter}轮"
+        elif self._response_elapsed > 0:
+            elapsed = f"{self._response_elapsed:.1f}s"
+        else:
+            elapsed = "..."
+        mcp_line = self._mcp_summary()
+        mcp_str = f" | {mcp_line}" if mcp_line else ""
+        return f" {mode_label} │ {model_name} │ {tok_str} │ {elapsed} " + mcp_str + " "
+
+    def _input_accepted(self, buf: Any) -> bool:
+        """回车提交：退出输入盒子 Application，返回输入文本。"""
+        get_app().exit(result=buf.text)
+        return True
+
+    def _build_input_app(self) -> Application[str]:
+        """输入盒子：上边框 + 输入行 + 下边框 + 状态栏（尾随盒子底部）。
+
+        非全屏，渲染在当前光标处（输出末尾），随输入文本换行而扩大。
+        """
+        top = Window(
+            FormattedTextControl("─" * self._width),
+            height=1,
+            style="class:input-border",
+            always_hide_cursor=True,
+        )
+        bottom = Window(
+            FormattedTextControl("─" * self._width),
+            height=1,
+            style="class:input-border",
+            always_hide_cursor=True,
+        )
+        status = Window(
+            FormattedTextControl(self._render_status_text),
+            height=1,
+            style="class:status",
+            always_hide_cursor=True,
+        )
+        self._input_textarea = TextArea(
+            multiline=False,
+            wrap_lines=True,
+            completer=self._slash_completer,
+            complete_while_typing=True,
+            accept_handler=self._input_accepted,
+            style="class:input",
+            height=Dimension(min=1),
+            prompt="> ",
+        )
+        container = HSplit([top, self._input_textarea, bottom, status])
+        return Application(
+            layout=Layout(container, focused_element=self._input_textarea),
+            style=PROMPT_STYLE,
+            full_screen=False,
+            mouse_support=False,
+            min_redraw_interval=0.05,
+        )
+
     async def run_async(self) -> None:
-        """异步主循环。"""
+        """非全屏主循环：输出终端原生滚动，输入框盒子 + 状态栏尾随输出末尾。"""
         self._render_banner()
         await self._dispatch_session_start()
         if self.task_mgr is not None:
             self._consume_task = asyncio.create_task(self._consume_task_done())
 
-        history = InMemoryHistory()
-        session: PromptSession[str] = PromptSession(
-            history=history,
-            style=PROMPT_STYLE,
-            completer=self._slash_completer,
-            complete_while_typing=True,
-        )
+        input_app = self._build_input_app()
 
         while not self._exit_flag:
-            self.console.print(Rule(style="dim"))
-
             try:
-                user_input = await session.prompt_async(
-                    message=[("class:prompt", "")],
-                    placeholder="Send a message...",
-                    bottom_toolbar=self._status_bar,
-                )
+                user_input = await input_app.run_async()
+                self._input_textarea.buffer.reset()
             except KeyboardInterrupt:
                 # 流式态 → 取消本轮；空闲态 → 退出
                 if self._turn_cancel is not None and not self._turn_cancel.is_set():
@@ -499,18 +568,17 @@ class ForgeApp:
                 self.console.print("再见！")
                 break
 
-            user_input = user_input.strip()
+            user_input = (user_input or "").strip()
             if not user_input:
                 continue
-            self.console.print(Rule(style="dim"))
 
             if await self.dispatch_slash(user_input):
                 continue
             try:
                 await self._submit(user_input)
             except asyncio.CancelledError:
-                    self.console.print()
-                    self.console.print("[dim]已中断[/dim]")
+                self.console.print()
+                self.console.print("[dim]已中断[/dim]")
 
         await self._dispatch_session_end()
         if self._consume_task is not None:
@@ -716,7 +784,7 @@ class ForgeApp:
                 self.console.print(
                     f"[red][hook {result.blocking_hook_name}] {result.reason}[/red]"
                 )
-                return  # 不消费输入，焦点仍在输入框
+                return  # 不消费输入
             self.conversation.add_user(text)
 
         # 开始计时 + 创建取消事件
@@ -725,6 +793,7 @@ class ForgeApp:
         self._turn_cancel = asyncio.Event()
         self._iter = 0
         self._agent_running = True
+        self._turn_live = None
 
         self.console.print()
         self.console.print(f"[bold cyan]user:[/bold cyan] {text}")
@@ -773,16 +842,17 @@ class ForgeApp:
                         in_thinking = False
                         if self._show_thinking:
                             self.console.print()
-                    # 流式打字 + 累积（done 时追加 Markdown 渲染）
+                    # 流式打字（Live 区域原地刷新，结束后渲染覆盖，不产生重复文本）
                     cur_text += ev.text
-                    self._stream_text(ev.text)
+                    self._live_update(cur_text)
 
                 elif ev.usage is not None:
                     self._total_input_tokens += ev.usage.input_tokens
                     self._total_output_tokens += ev.usage.output_tokens
 
                 elif ev.approval is not None:
-                    # 人在回路：展示待批准块，等待用户选择
+                    # 人在回路：先固化正文渲染，再展示待批准块
+                    self._finalize_live(cur_text)
                     await self._handle_approval(ev.approval, timer_task)
 
                 elif ev.tool is not None:
@@ -790,11 +860,8 @@ class ForgeApp:
                     first_content = True
                     in_thinking = False
                     thinking_shown_header = False
-                    if cur_text.strip():
-                        self.console.print()
-                        self.console.print(Rule(style="dim"))
-                        self.console.print(Markdown(cur_text))
-                        cur_text = ""
+                    self._finalize_live(cur_text)
+                    cur_text = ""
 
                     if ev.tool.phase == Phase.START:
                         self._render_tool_start(ev.tool)
@@ -806,43 +873,33 @@ class ForgeApp:
                     self._iter = ev.iter
 
                 elif ev.notice:
+                    self._finalize_live(cur_text)
                     self.console.print()
                     self.console.print(f"[dim]{ev.notice}[/dim]")
 
                 elif ev.done:
                     self._on_first_content(timer_task, first_content)
                     self._response_elapsed = time.time() - self._response_start
-                    if cur_text.strip():
-                        self.console.print()
-                        self.console.print(Rule(style="dim"))
-                        self.console.print(Markdown(cur_text))
+                    self._finalize_live(cur_text)
 
                 elif ev.err:
                     self._on_first_content(timer_task, first_content)
-                    if cur_text.strip():
-                        self.console.print()
-                        self.console.print(Rule(style="dim"))
-                        self.console.print(Markdown(cur_text))
+                    self._finalize_live(cur_text)
                     self.console.print(f"[red]✕ {ev.err}[/red]")
 
         except asyncio.CancelledError:
             timer_task.cancel()
-            if cur_text.strip():
-                self.console.print()
-                self.console.print(Rule(style="dim"))
-                self.console.print(Markdown(cur_text))
+            self._finalize_live(cur_text)
             self.console.print()
             self.console.print("[dim]已中断[/dim]")
         except Exception as e:
             timer_task.cancel()
-            if cur_text.strip():
-                self.console.print()
-                self.console.print(Rule(style="dim"))
-                self.console.print(Markdown(cur_text))
+            self._finalize_live(cur_text)
             self.console.print(f"[red]✕ 对话出错: {e}[/red]")
 
         timer_task.cancel()
         self._agent_running = False
+        self._finalize_live(cur_text)
         self.console.print()
 
     # ── 响应计时器 ────────────────────────────────
@@ -866,7 +923,6 @@ class ForgeApp:
         """首次收到内容时取消计时器，结束 \\r 状态行。"""
         if not first:
             timer_task.cancel()
-            # 换行结束 Imagining 行，后续内容正常输出
             sys.stdout.write("\n")
             sys.stdout.flush()
 
@@ -883,7 +939,7 @@ class ForgeApp:
                     f"  原因：{req.reason}\n\n"
                     f"  1. 允许本次\n"
                     f"  2. 永久允许（写入本地配置）\n"
-                    f"  3. 拒绝本次\n"
+                    f"  3. 拒绝本次\n",
                 ),
                 title="权限确认",
                 border_style="yellow",
@@ -937,6 +993,46 @@ class ForgeApp:
         sys.stdout.write(text)
         sys.stdout.flush()
 
+    @staticmethod
+    def _render_markdown(text: str) -> Markdown:
+        """统一的 Markdown 渲染：显式启用 pygments 语法高亮。
+
+        已安装 pygments，代码块默认高亮。code_theme 可换：
+        monokai / solarized-dark / vim / gruvbox-dark 等。
+        """
+        return Markdown(text, code_theme="monokai", hyperlinks=True)
+
+    # ── 正文区 Live 覆盖 ──────────────────────────
+
+    def _live_update(self, text: str) -> None:
+        """把流式正文更新到 Live 区域（原地刷新，不产生重复文本）。"""
+        if self._turn_live is None:
+            self._turn_live = Live(
+                console=self.console,
+                refresh_per_second=15,
+                transient=False,
+            )
+            self._turn_live.start()
+        self._turn_live.update(Text(text))
+
+    def _finalize_live(self, cur_text: str) -> None:
+        """结束正文区：用 Markdown 渲染原地替换流式源码并固定到屏幕。
+
+        非 transient 模式，stop 时 Live 内容保留在屏幕上，
+        因此最终只有一份渲染后的文本。
+        """
+        live = self._turn_live
+        self._turn_live = None
+        if live is None:
+            return
+        try:
+            if cur_text.strip():
+                live.update(self._render_markdown(cur_text))
+            live.stop()
+        except Exception:
+            if cur_text.strip():
+                self.console.print(self._render_markdown(cur_text))
+
     # ── 渲染 ──────────────────────────────────────
 
     def _render_banner(self) -> None:
@@ -947,7 +1043,7 @@ class ForgeApp:
 
         self.console.print()
         self.console.print(f"[bold]{FORGECODE_ART}[/bold]")
-        self.console.print(f"  [bold]⚒[/bold] [bold]ForgeCode[/bold] [dim]v{VERSION}[/dim]    {cwd}")
+        self.console.print(f"  [bold]⚒[/bold]   [bold]ForgeCode[/bold] [dim]v{VERSION}[/dim]    {cwd}")
 
         # MCP 连接状态（移至底部状态栏）
         # mcp_line = self._mcp_summary()
@@ -971,30 +1067,6 @@ class ForgeApp:
         if not servers:
             return ""
         return f"Connected to {len(servers)} MCP server(s), {tool_count} tool(s) registered"
-
-    def _status_bar(self) -> list[tuple[str, str]]:
-        model_name = self._active_model()
-
-        # 权限模式标签
-        mode_label = self.mode.label()
-
-        # token 用量
-        it = self._total_input_tokens
-        ot = self._total_output_tokens
-        tok_str = f"↑{_fmt_tok(it)} ↓{_fmt_tok(ot)}"
-
-        # 响应耗时 + 轮次
-        if self._response_elapsed > 0:
-            elapsed = f"{self._response_elapsed:.1f}s"
-        elif self._iter > 0:
-            elapsed = f"第{self._iter}轮..."
-        else:
-            elapsed = "..."
-
-        mcp_line = self._mcp_summary()
-        mcp_str = f" | {mcp_line}" if mcp_line else ""
-        bar = f" {mode_label} │ {model_name} │ {tok_str} │ {elapsed} " + mcp_str + " "
-        return [("class:bottom-toolbar.text", bar)]
 
     def _active_model(self) -> str:
         for p in self.config.providers:

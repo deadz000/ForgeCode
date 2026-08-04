@@ -25,7 +25,7 @@ class TaskListTool:
         return "列出当前所有后台子任务（id / name / status / tool_count / last_activity）"
 
     def parameters(self) -> dict[str, Any]:
-        return {}
+        return {"type": "object", "properties": {}}
 
     async def execute(self, args: str) -> Result:
         data = [

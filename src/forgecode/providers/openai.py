@@ -14,7 +14,14 @@ from forgecode.conversation.history import (
     ROLE_USER,
     ToolCall,
 )
-from forgecode.providers import BaseProvider, PromptTooLongError, Request, StreamEvent, Usage
+from forgecode.providers import (
+    BaseProvider,
+    PromptTooLongError,
+    Request,
+    StreamEvent,
+    Usage,
+    ensure_object_schema,
+)
 
 
 class OpenAIProvider(BaseProvider):
@@ -48,7 +55,7 @@ class OpenAIProvider(BaseProvider):
                     "function": {
                         "name": t.name,
                         "description": t.description,
-                        "parameters": t.input_schema,
+                        "parameters": ensure_object_schema(t.input_schema),
                     },
                 }
                 for t in req.tools

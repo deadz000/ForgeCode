@@ -5,9 +5,27 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from typing import Any
 
 from forgecode.config.schema import ProviderConfig
 from forgecode.conversation.history import Message, ToolDefinition
+
+# ── 工具 schema 规范化 ────────────────────────────
+
+
+def ensure_object_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """确保工具参数 schema 是合法的 JSON Schema object。
+
+    无参数工具可能返回空 dict，而 OpenAI 的 parameters / Anthropic 的
+    input_schema 都必须为 'type: "object"'，否则 API 会 400 拒绝。
+    """
+    if not isinstance(schema, dict):
+        return {"type": "object", "properties": {}}
+    if schema.get("type") != "object":
+        props = schema.get("properties", {})
+        return {"type": "object", "properties": props if isinstance(props, dict) else {}}
+    return schema
+
 
 # ── 哨兵异常 ──────────────────────────────────────
 
