@@ -28,6 +28,10 @@ class Result:
 # ── 工具抽象 ──────────────────────────────────────
 
 
+# 区分「未声明 timeout 属性」与「显式声明 timeout=None」
+_MISSING = object()
+
+
 @runtime_checkable
 class Tool(Protocol):
     """统一工具抽象（F1）。"""
@@ -157,18 +161,32 @@ class Registry:
         return len(self._tools)
 
     async def execute(self, name: str, args: str, timeout: float = DEFAULT_TIMEOUT) -> Result:
-        """按名查找工具并执行，带超时保护。"""
+        """按名查找工具并执行，带超时保护。
+
+        工具可声明 ``timeout`` 类属性自管理超时：
+        - 声明为 None → 豁免本方法的外层 wait_for（如 Agent 工具内部有
+          120s 前台超时转后台逻辑，外层 30s 会提前取消整个子 Agent）
+        - 声明为正数 → 用该值作为超时
+        - 未声明 → 用传入的默认 timeout
+        """
         tool = self.get(name)
         if tool is None:
             return Result(
                 content=f"未知工具: {name}",
                 is_error=True,
             )
+        declared: object = getattr(tool, "timeout", _MISSING)
+        if declared is not _MISSING:
+            eff_timeout = declared if isinstance(declared, (int, float)) else None
+        else:
+            eff_timeout = timeout
         try:
-            return await asyncio.wait_for(tool.execute(args), timeout=timeout)
+            if eff_timeout is None:
+                return await tool.execute(args)
+            return await asyncio.wait_for(tool.execute(args), timeout=eff_timeout)
         except TimeoutError:
             return Result(
-                content=f"工具 {name} 执行超时（{timeout}s）",
+                content=f"工具 {name} 执行超时（{eff_timeout}s）",
                 is_error=True,
             )
         except Exception as e:

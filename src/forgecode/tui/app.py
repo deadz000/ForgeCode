@@ -496,6 +496,75 @@ class ForgeApp:
         mcp_str = f" | {mcp_line}" if mcp_line else ""
         return f" {mode_label} │ {model_name} │ {tok_str} │ {elapsed} " + mcp_str + " "
 
+    def _make_input(self):
+        """构造输入读取器：让 Windows 下 Shift+Enter 识别为换行。
+
+        Windows 两种输入模式下 Shift+Enter 与 Enter 默认都无法区分：
+        - 经典控制台（ConsoleInputReader）：shift 映射表没有 Enter，都变
+          ControlM。按 KEY_EVENT_RECORD 的 VK_RETURN + SHIFT 区分。
+        - 虚拟终端模式（Vt100ConsoleInputReader，Windows Terminal）：
+          _get_keys 只提取 u_char、丢弃 ControlKeyState。同样按
+          VK_RETURN + SHIFT 区分，输出 \n 让 Vt100Parser 解析为 ControlJ。
+        """
+        if os.name != "nt":
+            return None
+        try:
+            from prompt_toolkit.input.win32 import (
+                KEY_EVENT_RECORD,
+                ConsoleInputReader,
+                EventTypes,
+                Vt100ConsoleInputReader,
+                Win32Input,
+            )
+            from prompt_toolkit.key_binding.key_processor import KeyPress
+            from prompt_toolkit.keys import Keys
+
+            _shift_pressed = 0x0010
+            _vk_return = 0x0D
+
+            class _ClassicShiftEnterReader(ConsoleInputReader):
+                """经典模式：Shift+Enter → ControlJ（换行）。"""
+
+                def _event_to_key_presses(self, ev):
+                    result = super()._event_to_key_presses(ev)
+                    if (
+                        ev.ControlKeyState & _shift_pressed
+                        and ev.VirtualKeyCode == _vk_return
+                    ):
+                        return [KeyPress(Keys.ControlJ, "\n")]
+                    return result
+
+            class _VtShiftEnterReader(Vt100ConsoleInputReader):
+                """VT 模式：Shift+Enter 的 u_char 由 \\r 改 \\n → ControlJ。"""
+
+                def _get_keys(self, read, input_records):
+                    for i in range(read.value):
+                        ir = input_records[i]
+                        if ir.EventType in EventTypes:
+                            ev = getattr(ir.Event, EventTypes[ir.EventType])
+                            if isinstance(ev, KEY_EVENT_RECORD) and ev.KeyDown:
+                                u_char = ev.uChar.UnicodeChar
+                                if (
+                                    u_char == "\r"
+                                    and ev.ControlKeyState & _shift_pressed
+                                    and ev.VirtualKeyCode == _vk_return
+                                ):
+                                    u_char = "\n"
+                                if u_char != "\x00":
+                                    yield u_char
+
+            class _ForgeWin32Input(Win32Input):
+                def __init__(self):
+                    super().__init__()
+                    if self._use_virtual_terminal_input:
+                        self.console_input_reader = _VtShiftEnterReader()
+                    else:
+                        self.console_input_reader = _ClassicShiftEnterReader()
+
+            return _ForgeWin32Input()
+        except Exception:
+            return None
+
     def _input_accepted(self, buf: Any) -> bool:
         """回车提交：退出输入盒子 Application，返回输入文本。"""
         get_app().exit(result=buf.text)
@@ -525,8 +594,9 @@ class ForgeApp:
             always_hide_cursor=True,
         )
         self._input_textarea = TextArea(
-            multiline=False,
+            multiline=True,
             wrap_lines=True,
+            dont_extend_height=True,
             completer=self._slash_completer,
             complete_while_typing=True,
             accept_handler=self._input_accepted,
@@ -546,7 +616,19 @@ class ForgeApp:
         #   Shift-Tab → 循环切换权限模式
         #   Esc → 关闭补全菜单
         #   Ctrl+C → 抛 KeyboardInterrupt
+        #   Enter → 提交（multiline 下默认 Enter 是换行，需显式覆盖）
+        #   Ctrl+J / Shift+Enter → 换行（\n 在多数终端是 Shift+Enter 产生的序列）
         kb = KeyBindings()
+
+        @kb.add("enter")
+        def _on_enter(event: KeyPressEvent) -> None:
+            # multiline 模式下 Enter 默认插入换行，这里改为提交
+            event.current_buffer.validate_and_handle()
+
+        @kb.add("c-j")
+        def _on_newline(event: KeyPressEvent) -> None:
+            # \n = Ctrl+J；Shift+Enter 在多数终端发送 \n，视为换行
+            event.current_buffer.newline()
 
         @kb.add("tab")
         def _on_tab(event: KeyPressEvent) -> None:
@@ -571,9 +653,20 @@ class ForgeApp:
 
         @kb.add("c-c")
         def _on_ctrl_c(event: KeyPressEvent) -> None:
-            # 标准退出方式：异常在 run_async() 返回处重新抛出。
-            # 直接 raise 会逃出 prompt_toolkit 的键处理链，导致 asyncio.run 崩溃。
-            event.app.exit(exception=KeyboardInterrupt())
+            # 空闲态：第一次只提示、不退出应用（退出会让外层 continue
+            # 重新渲染一个新输入框，造成重复）；第二次才退出。
+            if self._agent_running:
+                if self._turn_cancel is not None and not self._turn_cancel.is_set():
+                    self._turn_cancel.set()
+                self.console.print()
+                self.console.print("[dim]正在取消...[/dim]")
+                return
+            self._idle_ctrl_c_count += 1
+            if self._idle_ctrl_c_count >= 2:
+                event.app.exit(exception=KeyboardInterrupt())
+                return
+            self.console.print()
+            self.console.print("[dim]Press Ctrl+C again to exit[/dim]")
 
         return Application(
             layout=Layout(container, focused_element=self._input_textarea),
@@ -582,6 +675,7 @@ class ForgeApp:
             mouse_support=False,
             min_redraw_interval=0.05,
             key_bindings=kb,
+            input=self._make_input(),
         )
 
     async def run_async(self) -> None:
@@ -598,21 +692,11 @@ class ForgeApp:
                 user_input = await input_app.run_async()
                 self._input_textarea.buffer.reset()
             except KeyboardInterrupt:
-                # 流式态 → 取消本轮
-                if self._turn_cancel is not None and not self._turn_cancel.is_set():
-                    self._turn_cancel.set()
-                    self.console.print()
-                    self.console.print("[dim]正在取消...[/dim]")
-                    continue
-                # 空闲态 → 第一次提示，第二次退出
-                self._idle_ctrl_c_count += 1
-                if self._idle_ctrl_c_count >= 2:
-                    self.console.print()
-                    self.console.print("[dim]再见！[/dim]")
-                    self._exit_flag = True
-                    continue
+                # 区分逻辑已全部在 c-c 绑定内处理（流式取消 / 空闲提示+二次退出）。
+                # 能到这里说明第二次空闲 Ctrl+C 或流式态取消已确认，直接退出。
                 self.console.print()
-                self.console.print("[dim]Press Ctrl+C again to exit[/dim]")
+                self.console.print("[dim]再见！[/dim]")
+                self._exit_flag = True
                 continue
             except EOFError:
                 self.console.print()
@@ -911,6 +995,11 @@ class ForgeApp:
                     # 人在回路：先固化正文渲染，再展示待批准块
                     self._finalize_live(cur_text)
                     await self._handle_approval(ev.approval, timer_task)
+                    # 审批通过后主 Agent 继续执行工具（可能启动子 Agent），
+                    # _handle_approval 已取消原计时器，这里重启以便有可见反馈。
+                    if not timer_task.done():
+                        timer_task.cancel()
+                    timer_task = asyncio.create_task(self._show_imagining())
 
                 elif ev.tool is not None:
                     self._on_first_content(timer_task, first_content)

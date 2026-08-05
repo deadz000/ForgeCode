@@ -73,6 +73,10 @@ class AgentTool:
 
     read_only = False
     is_system = False
+    # 自管理超时：内部已有 120s 前台超时转后台逻辑，
+    # 必须声明 timeout=None 豁免 Registry 的 30s 默认超时，
+    # 否则外层 wait_for 会提前取消整个子 Agent（120s 转后台形同虚设）。
+    timeout: float | None = None
 
     def set_parent(self, parent: Agent) -> None:
         self._parent = parent
