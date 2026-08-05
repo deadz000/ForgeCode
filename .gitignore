@@ -15,6 +15,10 @@ forgecode.yaml
 # 全局配置（含 API Key）
 .forgecode/
 
+# ch14: Worktree 隔离副本（仅供 SubAgent 与手动管理使用）
+.forgecode/worktrees/
+.forgecode/worktree_session.json
+
 # uv
 uv.lock
 

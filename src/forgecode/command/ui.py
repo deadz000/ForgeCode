@@ -20,6 +20,25 @@ class SkillSummary:
     mode: str
 
 
+@dataclass(frozen=True)
+class WorktreeSummary:
+    name: str
+    path: str
+    branch: str
+    active: bool
+    manual: bool
+
+
+class WorktreeAccessor(Protocol):
+    """/worktree 命令访问 Worktree 管理器的轻量协议（屏蔽反向依赖）。"""
+
+    async def create(self, name: str) -> tuple[str, str]: ...  # (path, branch)
+    def list(self) -> list[WorktreeSummary]: ...
+    async def enter(self, name: str) -> None: ...
+    async def exit(self, action: str, discard: bool) -> bool: ...  # removed
+    async def remove(self, name: str, discard: bool) -> None: ...
+
+
 class UI(Protocol):
     """命令 handler 通过该协议访问 TUI 能力，不直接持有 TUI 框架类型。"""
 
@@ -51,6 +70,9 @@ class UI(Protocol):
     async def append_assistant_message(self, text: str) -> None: ...
     def recent_messages(self, n: int) -> list[Message]: ...
     def all_messages(self) -> list[Message]: ...
+
+    # ── Worktree 访问 ──
+    def worktree_accessor(self) -> WorktreeAccessor | None: ...
 
     # ── Hook 查询 ──
     def hook_sources(self) -> list[str]: ...
@@ -131,6 +153,9 @@ class NopUI:
 
     def hook_rules(self) -> list:
         return []
+
+    def worktree_accessor(self) -> WorktreeAccessor | None:
+        return None
 
     def quit(self) -> None:
         pass

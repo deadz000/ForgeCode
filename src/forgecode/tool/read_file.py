@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from forgecode.tool import Result, _parse_args, _truncate
+from forgecode.tool.ctx import resolve_path
 
 
 class ReadFileTool:
@@ -45,7 +46,7 @@ class ReadFileTool:
         if not path_str:
             return Result(content="缺少必填参数: path", is_error=True)
 
-        path = Path(path_str)
+        path = Path(resolve_path(path_str))
         if not path.exists():
             return Result(content=f"文件不存在: {path}", is_error=True)
         if path.is_dir():

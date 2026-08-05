@@ -18,6 +18,7 @@ from forgecode.command.builtin_ui import (
     handle_plan,
     handle_resume,
 )
+from forgecode.command.builtin_worktree import handle_worktree
 from forgecode.command.command import Command, Kind
 from forgecode.command.registry import Registry
 from forgecode.tui.hooks import handle_hooks
@@ -112,6 +113,13 @@ def register_builtins(reg: Registry) -> None:
             description="列出已加载的 Skill",
             kind=Kind.LOCAL,
             handler=handle_skill,
+        ),
+        Command(
+            name="worktree",
+            description="管理 Worktree（create/list/enter/exit/remove）",
+            kind=Kind.LOCAL,
+            handler=handle_worktree,
+            accepts_args=True,
         ),
     ]
 

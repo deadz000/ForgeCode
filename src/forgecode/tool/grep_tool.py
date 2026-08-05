@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 from forgecode.tool import Result, _parse_args
+from forgecode.tool.ctx import resolve_path
 
 
 class GrepTool:
@@ -56,7 +57,7 @@ class GrepTool:
         except re.error as e:
             return Result(content=f"正则非法: {e}", is_error=True)
 
-        root = Path(data.get("path") or ".")
+        root = Path(resolve_path(data.get("path") or "."))
         file_glob = data.get("glob")
 
         hits: list[str] = []

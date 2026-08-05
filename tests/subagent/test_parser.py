@@ -101,3 +101,23 @@ def test_bom_stripped() -> None:
     d = parse_definition(data, "x.md", Source.USER)
     assert d.name == "x"
     assert d.system_prompt == "body"
+
+
+def test_isolation_worktree_parsed() -> None:
+    data = b"---\nname: wt\ndescription: d\nisolation: worktree\n---\n"
+    d = parse_definition(data, "wt.md", Source.USER)
+    assert d.isolation == "worktree"
+
+
+def test_isolation_default_empty() -> None:
+    data = b"---\nname: plain\ndescription: d\n---\n"
+    d = parse_definition(data, "plain.md", Source.USER)
+    assert d.isolation == ""
+
+
+def test_isolation_invalid_falls_back(capsys: pytest.CaptureFixture[str]) -> None:
+    data = b"---\nname: bad\ndescription: d\nisolation: gibberish\n---\n"
+    d = parse_definition(data, "bad.md", Source.USER)
+    assert d.isolation == ""
+    captured = capsys.readouterr()
+    assert "unknown isolation" in captured.err

@@ -11,7 +11,7 @@ import json
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from forgecode.agent import Agent
 from forgecode.agent.fork import build_forked_messages, is_fork_context
@@ -20,6 +20,9 @@ from forgecode.conversation.history import Conversation
 from forgecode.subagent import Definition
 from forgecode.tool import Result
 from forgecode.tool.filter import FilterParams, apply_agent_tool_filter
+
+if TYPE_CHECKING:
+    from forgecode.worktree.manager import Manager
 
 # 前台子 Agent 超时自动切后台的秒数（spec F17-2）
 AUTO_BACKGROUND_SECONDS: float = 120.0
@@ -64,11 +67,13 @@ class AgentTool:
         task_mgr: TaskManager,
         parent: Agent | None = None,
         bg_enabled: bool = True,
+        worktree_mgr: Manager | None = None,
     ) -> None:
         self._catalog = catalog
         self._task_mgr = task_mgr
         self._parent = parent
         self._bg_enabled = bg_enabled
+        self.worktree_mgr: Manager | None = worktree_mgr
         self._get_parent_conv: Callable[[], Conversation] | None = None
 
     read_only = False
@@ -169,6 +174,12 @@ class AgentTool:
         if background and not self._bg_enabled:
             return Result(content="background mode is disabled by config", is_error=True)
 
+        # ── isolation:worktree → 强制前台（本期最小实现，spec F23）──
+        if defi.isolation == "worktree":
+            if self.worktree_mgr is None:
+                return Result(content="worktree manager not configured", is_error=True)
+            background = False
+
         # ── 工具过滤（多层防线）──
         names = [d.name for d in parent._registry.definitions()]
         if defi.is_fork():
@@ -237,10 +248,23 @@ class AgentTool:
         partial = PartialState()
         aggregator = asyncio.create_task(_aggregate_partial(events, partial))
         try:
-            final_text = await asyncio.wait_for(
-                sub_agent.run_to_completion(sub_conv, a_args.prompt, events),  # type: ignore[attr-defined]
-                timeout=AUTO_BACKGROUND_SECONDS,
-            )
+            if defi.isolation == "worktree":
+                from forgecode.agent.agent_worktree import _execute_with_worktree
+
+                assert self.worktree_mgr is not None
+                final_text = await _execute_with_worktree(
+                    self.worktree_mgr,
+                    defi,
+                    sub_agent,
+                    sub_conv,
+                    a_args.prompt,
+                    events,
+                )
+            else:
+                final_text = await asyncio.wait_for(
+                    sub_agent.run_to_completion(sub_conv, a_args.prompt, events),  # type: ignore[attr-defined]
+                    timeout=AUTO_BACKGROUND_SECONDS,
+                )
         except TimeoutError:
             task_id = await self._task_mgr.adopt_running(
                 sub_agent, sub_conv, a_args.name, events, partial

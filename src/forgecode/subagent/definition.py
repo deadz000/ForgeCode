@@ -37,6 +37,7 @@ class Definition:
     permission_mode: Mode = Mode.DEFAULT  # 子 Agent 启动权限模式
     dont_ask: bool = False  # 子 Agent 专属：Ask 级工具直接放行
     background: bool = False  # true 时忽略 run_in_background 参数强制后台
+    isolation: str = ""  # 文件系统隔离：""（共享）/ "worktree"（独立 Worktree 副本）
     system_prompt: str = ""  # Markdown body（去 frontmatter 后的全文）
     file_path: str = ""  # 定义文件绝对路径（调试用）
     source: Source = Source.BUILTIN

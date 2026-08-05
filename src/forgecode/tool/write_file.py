@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from forgecode.tool import Result, _parse_args
+from forgecode.tool.ctx import resolve_path
 
 
 class WriteFileTool:
@@ -48,7 +49,7 @@ class WriteFileTool:
         if content is None:
             return Result(content="缺少必填参数: content", is_error=True)
 
-        path = Path(path_str)
+        path = Path(resolve_path(path_str))
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")

@@ -6,7 +6,7 @@ import argparse
 import asyncio
 import os
 import sys
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from forgecode.agent.agent_tool import AgentTool
@@ -44,6 +44,7 @@ from forgecode.tool import new_default_registry
 from forgecode.tool.install_skill import InstallSkillTool
 from forgecode.tool.load_skill import LoadSkillTool
 from forgecode.tui.app import VERSION, ForgeApp
+from forgecode.worktree import Manager as WorktreeManager
 
 
 def parse_args() -> argparse.Namespace:
@@ -165,6 +166,17 @@ async def _amain(app_config, provider, conversation, registry, runtime) -> None:
         # ── SubAgent：角色 Catalog + 后台任务 Manager + 5 个新工具 ──
         subagent_catalog = load_subagent_catalog(root)
         task_mgr = TaskManager()
+
+        # ── Worktree 隔离管理器（失败降级为 None，不阻断启动）──
+        try:
+            worktree_mgr = WorktreeManager(root)
+        except Exception as exc:
+            print(f"Worktree 管理器降级: {exc}", file=sys.stderr)
+            worktree_mgr = None
+        if worktree_mgr is not None:
+            # 后台跑一次过期临时 Worktree 清理，不阻塞启动
+            asyncio.create_task(worktree_mgr.sweep_stale(datetime.now() - timedelta(hours=24)))
+
         registry.register(TaskListTool(task_mgr))
         registry.register(TaskGetTool(task_mgr))
         registry.register(TaskStopTool(task_mgr))
@@ -175,6 +187,7 @@ async def _amain(app_config, provider, conversation, registry, runtime) -> None:
                 task_mgr,
                 parent=None,
                 bg_enabled=app_config.effective_enable_subagent_background(),
+                worktree_mgr=worktree_mgr,
             )
         )
 
@@ -251,6 +264,7 @@ async def _amain(app_config, provider, conversation, registry, runtime) -> None:
             hook_engine=hook_engine,
             task_mgr=task_mgr,
             subagent_catalog=subagent_catalog,
+            worktree_mgr=worktree_mgr,
         )
         app_finished = False
         try:

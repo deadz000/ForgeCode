@@ -8,13 +8,15 @@ from forgecode.command import NopUI, Registry, register_builtins
 from forgecode.command.builtin_local import handle_status
 from forgecode.command.builtin_prompt import handle_do
 from forgecode.command.builtin_ui import handle_compact
+from forgecode.command.builtin_worktree import handle_worktree
+from forgecode.command.ui import WorktreeSummary
 from forgecode.permission import Mode
 
 # ── 注册完整性 ──
 
 
 def test_register_builtins_all_registered():
-    """注册后 visible() 含 13 条命令，名字完整且按字典序。"""
+    """注册后 visible() 含 14 条命令，名字完整且按字典序。"""
     reg = Registry()
     register_builtins(reg)
     visible = reg.visible()
@@ -33,8 +35,9 @@ def test_register_builtins_all_registered():
         "session",
         "skill",
         "status",
+        "worktree",
     ]
-    assert len(visible) == 13
+    assert len(visible) == 14
     assert names == expected
 
 
@@ -42,7 +45,7 @@ def test_register_builtins_no_collision():
     """直接调 register_builtins 不抛异常。"""
     reg = Registry()
     register_builtins(reg)
-    assert len(reg.visible()) == 13
+    assert len(reg.visible()) == 14
 
 
 # ── NopUI 不抛 ──
@@ -73,12 +76,16 @@ class RecordingUI(NopUI):
         self.injected_preset: str | None = None
         self._idle: bool = True
         self.compact_called: bool = False
+        self._accessor = None
 
     def println(self, msg: str) -> None:
         self.printed.append(msg)
 
     def error(self, msg: str) -> None:
         self.errors.append(msg)
+
+    def worktree_accessor(self):
+        return self._accessor
 
     def get_mode(self) -> Mode:
         return self._mode
@@ -153,6 +160,117 @@ async def test_help_handler_output():
         "session",
         "skill",
         "status",
+        "worktree",
     ]
     for name in expected_names:
         assert f"/{name}" in output, f"Missing /{name} in help output"
+
+
+# ── /worktree handler ──
+
+
+class StubWorktreeAccessor:
+    """记录调用并返回固定结果的 WorktreeAccessor 桩。"""
+
+    def __init__(self) -> None:
+        self.created: list[str] = []
+        self.entered: list[str] = []
+        self.exited: list[tuple[str, bool]] = []
+        self.removed: list[tuple[str, bool]] = []
+
+    async def create(self, name: str) -> tuple[str, str]:
+        self.created.append(name)
+        return f"/path/{name}", f"branch-{name}"
+
+    def list(self) -> list[WorktreeSummary]:
+        return [
+            WorktreeSummary(
+                name="alice", path="/p/alice", branch="worktree-alice", active=False, manual=True
+            ),
+            WorktreeSummary(name="bob", path="/p/bob", branch="worktree-bob", active=True, manual=False),
+        ]
+
+    async def enter(self, name: str) -> None:
+        self.entered.append(name)
+
+    async def exit(self, action: str, discard: bool) -> bool:
+        self.exited.append((action, discard))
+        return True
+
+    async def remove(self, name: str, discard: bool) -> None:
+        self.removed.append((name, discard))
+
+
+@pytest.mark.asyncio
+async def test_handle_worktree_accessor_none_reports_error():
+    ui = RecordingUI()  # worktree_accessor() 返回 None
+    ui._current_slash_args = "list"
+    await handle_worktree(ui)
+    assert ui.errors
+    assert "未启用" in ui.errors[0]
+
+
+@pytest.mark.asyncio
+async def test_handle_worktree_create():
+    ui = RecordingUI()
+    accessor = StubWorktreeAccessor()
+    ui._accessor = accessor
+    ui._current_slash_args = "create foo"
+    await handle_worktree(ui)
+    assert accessor.created == ["foo"]
+    assert "Worktree 已创建" in ui.printed[0]
+    assert "branch-foo" in ui.printed[0]
+
+
+@pytest.mark.asyncio
+async def test_handle_worktree_list():
+    ui = RecordingUI()
+    accessor = StubWorktreeAccessor()
+    ui._accessor = accessor
+    ui._current_slash_args = "list"
+    await handle_worktree(ui)
+    output = "\n".join(ui.printed)
+    assert "alice" in output
+    assert "worktree-alice" in output
+    assert "[manual]" in output
+    assert "[active]" in output
+
+
+@pytest.mark.asyncio
+async def test_handle_worktree_enter():
+    ui = RecordingUI()
+    accessor = StubWorktreeAccessor()
+    ui._accessor = accessor
+    ui._current_slash_args = "enter bob"
+    await handle_worktree(ui)
+    assert accessor.entered == ["bob"]
+
+
+@pytest.mark.asyncio
+async def test_handle_worktree_exit_with_discard():
+    ui = RecordingUI()
+    accessor = StubWorktreeAccessor()
+    ui._accessor = accessor
+    ui._current_slash_args = "exit --remove --discard"
+    await handle_worktree(ui)
+    assert accessor.exited == [("remove", True)]
+
+
+@pytest.mark.asyncio
+async def test_handle_worktree_remove():
+    ui = RecordingUI()
+    accessor = StubWorktreeAccessor()
+    ui._accessor = accessor
+    ui._current_slash_args = "remove alice --discard"
+    await handle_worktree(ui)
+    assert accessor.removed == [("alice", True)]
+
+
+@pytest.mark.asyncio
+async def test_handle_worktree_unknown_subcommand():
+    ui = RecordingUI()
+    accessor = StubWorktreeAccessor()
+    ui._accessor = accessor
+    ui._current_slash_args = "bogus x"
+    await handle_worktree(ui)
+    assert ui.errors

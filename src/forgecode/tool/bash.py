@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 from forgecode.tool import Result, _parse_args, _truncate
+from forgecode.tool.ctx import resolve_path
 
 
 class BashTool:
@@ -50,6 +51,7 @@ class BashTool:
         try:
             proc = await asyncio.create_subprocess_shell(
                 cmd,
+                cwd=resolve_path(""),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

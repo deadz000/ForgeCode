@@ -40,6 +40,7 @@ from forgecode.permission.engine import Engine
 from forgecode.prompt import EXECUTE_DIRECTIVE
 from forgecode.providers import BaseProvider, create_provider
 from forgecode.tool import Registry
+from forgecode.tool.ctx import with_cwd
 from forgecode.tui.complete import SlashCompleter
 
 # ── FORGECODE pixel banner ──
@@ -99,6 +100,7 @@ class ForgeApp:
         hook_engine: HookEngine | None = None,
         task_mgr=None,
         subagent_catalog=None,
+        worktree_mgr=None,
     ) -> None:
         self.config = config
         self.provider = provider
@@ -136,6 +138,13 @@ class ForgeApp:
         self.executor = executor
         self.task_mgr = task_mgr
         self.subagent_catalog = subagent_catalog
+        self.worktree_mgr = worktree_mgr
+        # 当前 Worktree 会话的 cwd（空表示进程 cwd）；/worktree enter 后设置
+        self.active_cwd: str = ""
+        if worktree_mgr is not None:
+            session = worktree_mgr.current_session
+            if session is not None:
+                self.active_cwd = session.worktree_path
         # 后台任务通知消费协程（run_async 启动）
         self._consume_task = None
         # 是否在 Agent 运行中（/resume 互斥）
@@ -262,6 +271,23 @@ class ForgeApp:
     def clear_active_skills(self) -> None:
         if self.runtime is not None and self.runtime.active_skills is not None:
             self.runtime.active_skills.clear()
+
+    # ── Worktree 访问（/worktree 命令）──
+
+    def worktree_accessor(self):
+        """返回 WorktreeAdapter；未启用（非 git 仓库）时返回 None。"""
+        if self.worktree_mgr is None:
+            return None
+        from forgecode.tui.worktree_adapter import WorktreeAdapter
+
+        return WorktreeAdapter(self.worktree_mgr, self._set_active_cwd)
+
+    def _set_active_cwd(self, cwd: str) -> None:
+        self.active_cwd = cwd
+
+    def _effective_cwd(self) -> str:
+        """主 Agent Run 的 ctx cwd：优先 active_cwd，否则进程 cwd。"""
+        return self.active_cwd or str(os.getcwd())
 
     # ── Skill fork 需要（UI Protocol 缺失补齐）──
 
@@ -949,6 +975,9 @@ class ForgeApp:
         thinking_shown_header = False
         first_content = False
 
+        # 主 Agent Run 前注入 ctx cwd（active_cwd 为空 = 进程 cwd）
+        cwd_cm = with_cwd(self._effective_cwd())
+        cwd_cm.__enter__()
         try:
             async for ev in agent.run(self.conversation, self.mode, self._turn_cancel):
                 # ── 压缩生命周期事件（优先处理）──
@@ -1045,6 +1074,7 @@ class ForgeApp:
         except Exception as e:
             self.console.print(f"[red]✕ 对话出错: {e}[/red]")
         finally:
+            cwd_cm.__exit__(None, None, None)
             # 无论正常/异常/取消，完整清理——残留的 timer/agent_running/turn_cancel
             # 会导致状态栏永远 Imagining、后续 Ctrl+C 全部误判为流式态
             timer_task.cancel()
