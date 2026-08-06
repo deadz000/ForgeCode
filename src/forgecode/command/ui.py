@@ -74,6 +74,9 @@ class UI(Protocol):
     # ── Worktree 访问 ──
     def worktree_accessor(self) -> WorktreeAccessor | None: ...
 
+    # ── Team 访问 ──
+    def team_manager(self): ...
+
     # ── Hook 查询 ──
     def hook_sources(self) -> list[str]: ...
     def hook_rules(self) -> list[Rule]: ...
@@ -155,6 +158,9 @@ class NopUI:
         return []
 
     def worktree_accessor(self) -> WorktreeAccessor | None:
+        return None
+
+    def team_manager(self):
         return None
 
     def quit(self) -> None:

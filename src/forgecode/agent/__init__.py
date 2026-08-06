@@ -11,6 +11,7 @@ from enum import Enum, IntEnum
 from pathlib import Path
 from typing import Any
 
+from forgecode.agent.team_hook import teammate_context_from_ctx
 from forgecode.compact import (
     ManageInput,
     ManageOutput,
@@ -177,6 +178,14 @@ class Agent:
     def clear_active_skills(self) -> None:
         if self.runtime is not None and self.runtime.active_skills is not None:
             self.runtime.active_skills.clear()
+
+    def set_allowed_tools(self, tools: list[str] | None) -> None:
+        """收窄 Lead 工具集（Coordinator Mode）。None 恢复全量。"""
+        self._allowed_tools = tools
+
+    def append_system_prompt(self, suffix: str) -> None:
+        """在 system_prompt 末尾追加提示词（Coordinator 纪律段）。"""
+        self.system_prompt = (self.system_prompt or "") + "\n\n" + suffix
 
     # ── Hook 集成 ─────────────────────────────────────
 
@@ -351,10 +360,14 @@ class Agent:
             # ── PreUserMessage hook（在 provider.stream 之前）──
             await self._dispatch_hook(
                 HookEvent.PRE_USER_MESSAGE,
-                self._hook_payload(
-                    HookEvent.PRE_USER_MESSAGE, mode, prompt=_last_user_text(conv)
-                ),
+                self._hook_payload(HookEvent.PRE_USER_MESSAGE, mode, prompt=_last_user_text(conv)),
             )
+
+            # ── 队员邮箱注入：非 Team 上下文静默 no-op ──
+            if teammate_context_from_ctx() is not None:
+                from forgecode.agent.team_mailbox import ingest_team_mailbox
+
+                await ingest_team_mailbox(self)
 
             # ── Reminder 装配：plan reminder + hook 注入 prompt（置于其后）──
             reminder = self._build_reminder(mode, it)
@@ -398,9 +411,7 @@ class Agent:
                     return
                 await self._dispatch_hook(
                     HookEvent.NOTIFICATION,
-                    self._hook_payload(
-                        HookEvent.NOTIFICATION, mode, kind="stream_error", detail=str(err)
-                    ),
+                    self._hook_payload(HookEvent.NOTIFICATION, mode, kind="stream_error", detail=str(err)),
                 )
                 yield Event(err=err)
                 await _ensure_assistant_tail(conv, NOTICE_STREAM_ERR)
@@ -896,9 +907,7 @@ def _base_payload(event: HookEvent, mode: Mode, runtime: Any, **extra: Any) -> P
     """构造 hook payload 通用字段（event / session_id / cwd / mode）。"""
     p: Payload = {
         "event": event.value,
-        "session_id": runtime.session.session_id
-        if runtime is not None and runtime.session
-        else "",
+        "session_id": runtime.session.session_id if runtime is not None and runtime.session else "",
         "cwd": os.getcwd(),
         "mode": mode.name.lower(),
     }
@@ -915,9 +924,7 @@ def _tool_input_dict(call: ToolCall) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _hook_payload_for(
-    event: HookEvent, mode: Mode, runtime: Any, call: ToolCall, **extra: Any
-) -> Payload:
+def _hook_payload_for(event: HookEvent, mode: Mode, runtime: Any, call: ToolCall, **extra: Any) -> Payload:
     """构造工具事件 payload：通用字段 + tool_name / tool_input。"""
     return _base_payload(
         event,

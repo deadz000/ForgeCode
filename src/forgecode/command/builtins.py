@@ -11,6 +11,7 @@ from forgecode.command.builtin_local import (
 )
 from forgecode.command.builtin_prompt import handle_do
 from forgecode.command.builtin_skill import handle_skill
+from forgecode.command.builtin_team import handle_team
 from forgecode.command.builtin_ui import (
     handle_clear,
     handle_compact,
@@ -113,6 +114,13 @@ def register_builtins(reg: Registry) -> None:
             description="列出已加载的 Skill",
             kind=Kind.LOCAL,
             handler=handle_skill,
+        ),
+        Command(
+            name="team",
+            description="管理 Team（list/info/delete/kill）",
+            kind=Kind.LOCAL,
+            handler=handle_team,
+            accepts_args=True,
         ),
         Command(
             name="worktree",

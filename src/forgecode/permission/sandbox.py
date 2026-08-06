@@ -1,9 +1,16 @@
-"""路径沙箱：限定文件操作在项目根目录内（N2）。"""
+"""路径沙箱：限定文件操作在项目根目录内（N2）+ 系统临时目录白名单（N9）。
+
+/tmp 与 macOS 真实路径 /private/tmp 允许写入项目根之外，供工具脚本与队员中转。
+"""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
+
+# 系统临时目录白名单（规范 N9）。用原始路径前缀判断（跨平台：Windows 下
+# Path("/tmp/x") 会被当作相对路径，故在 Path 归一化之前检查原字符串）。
+_TMP_ALLOWED = ("/tmp/", "/private/tmp/")
 
 
 def resolve_root(root: str) -> str:
@@ -31,9 +38,19 @@ def _eval_symlinks_or_ancestor(abs_path: str) -> str:
     return result
 
 
+def _is_tmp_whitelisted(raw_path: str) -> bool:
+    """判断原始路径字符串是否位于系统临时目录白名单内（N9）。"""
+    normalized = raw_path.replace("\\", "/")
+    return normalized.startswith(_TMP_ALLOWED)
+
+
 def sandbox_ok(root: str, path: str) -> bool:
     """判断路径是否在项目根目录内。空路径视为 root。"""
     if not path:
+        return True
+
+    # 系统临时目录白名单放行（在 Path 归一化之前，避免 Windows 相对路径歧义）
+    if _is_tmp_whitelisted(path):
         return True
 
     # 相对路径相对 root 解析为绝对

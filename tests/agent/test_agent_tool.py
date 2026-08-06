@@ -206,3 +206,84 @@ async def test_fork_disabled_rejects_fork() -> None:
     result = await tool.execute(_args())  # 空 subagent_type → fork 路径（强制后台）
     assert result.is_error
     assert "background mode is disabled" in result.content
+
+
+# ── Team spawn 分支（F24/F25）──────────────────────
+
+
+class MockTeamHook:
+    def __init__(self, spawn_result: str = '{"member_name":"alice"}') -> None:
+        self.calls: list[dict] = []
+        self._result = spawn_result
+        self._ctx: tuple[str, str, bool] | None = None
+
+    def set_context(self, member: str, agent_id: str, inproc: bool) -> None:
+        self._ctx = (member, agent_id, inproc)
+
+    async def spawn_teammate(self, req) -> str:
+        self.calls.append(
+            {
+                "team_name": req.team_name,
+                "member_name": req.member_name,
+                "agent_type": req.agent_type,
+                "prompt": req.prompt,
+            }
+        )
+        return self._result
+
+
+@pytest.mark.asyncio
+async def test_team_name_routes_to_hook() -> None:
+    hook = MockTeamHook()
+    tool = AgentTool(
+        MockCatalog([_explore_def()]),
+        FakeTaskMgr(),
+        parent=_make_parent(FakeProvider()),
+        team_hook=hook,
+    )
+    tool.bind_conv_source(lambda: Conversation())
+    result = await tool.execute(_args(subagent_type="Explore", name="alice", team_name="demo"))
+    assert not result.is_error
+    assert hook.calls[0]["team_name"] == "demo"
+    assert hook.calls[0]["member_name"] == "alice"
+
+
+@pytest.mark.asyncio
+async def test_team_name_without_hook_errors() -> None:
+    tool = _make_tool(MockCatalog([_explore_def()]), FakeTaskMgr(), _make_parent(FakeProvider()))
+    result = await tool.execute(_args(team_name="demo"))
+    assert result.is_error
+    assert "team_hook 缺失" in result.content
+
+
+@pytest.mark.asyncio
+async def test_inprocess_teammate_cannot_spawn() -> None:
+    from forgecode.agent.team_hook import TeammateContext, with_teammate_context
+
+    hook = MockTeamHook()
+    tool = AgentTool(
+        MockCatalog([_explore_def()]),
+        FakeTaskMgr(),
+        parent=_make_parent(FakeProvider()),
+        team_hook=hook,
+    )
+    tool.bind_conv_source(lambda: Conversation())
+
+    async def _noop_read():
+        return [], []
+
+    async def _noop_mark(indices):
+        pass
+
+    tc = TeammateContext(
+        team_name="demo",
+        member_name="alice",
+        agent_id="agent-1",
+        backend_type="in-process",
+        read_unread=_noop_read,
+        mark_read=_noop_mark,
+    )
+    with with_teammate_context(tc):
+        result = await tool.execute(_args(team_name="demo"))
+    assert result.is_error
+    assert "in-process 队员" in result.content

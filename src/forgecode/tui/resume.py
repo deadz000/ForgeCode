@@ -47,10 +47,7 @@ def format_session_item(info: SessionInfo, index: int) -> str:
 
     title = info.title if info.title else "(空)"
 
-    return (
-        f"  {index}. {title}  "
-        f"[dim]· {rel_time} · {info.model} · {size_str}[/dim]"
-    )
+    return f"  {index}. {title}  [dim]· {rel_time} · {info.model} · {size_str}[/dim]"
 
 
 async def do_resume_session(
@@ -73,8 +70,7 @@ async def do_resume_session(
         if gap > _RESUME_GAP_THRESHOLD:
             duration = _format_duration(gap)
             reminder = (
-                f"[系统提示] 本会话已暂停 {duration}。"
-                "部分上下文可能已过时，如需最新信息请重新读取相关文件。"
+                f"[系统提示] 本会话已暂停 {duration}。部分上下文可能已过时，如需最新信息请重新读取相关文件。"
             )
             msgs.append(Message(role=ROLE_USER, content=reminder))
 

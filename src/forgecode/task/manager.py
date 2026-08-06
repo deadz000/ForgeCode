@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Any, Protocol
@@ -90,10 +91,42 @@ class Manager:
         self._by_name: dict[str, str] = {}  # name -> id，后启动的覆盖
         self._done: asyncio.Queue[str] = asyncio.Queue(maxsize=32)
         self._counter: int = 0
+        # Team 模块注入的 AgentNameRegistry（可选，None 时退回本地 _by_name）
+        self._name_reg: Any = None
+        # 任务结束回调（on_task_done），可注册多个
+        self._done_callbacks: list[Callable[[str], Awaitable[None]]] = []
 
     def _next_id(self) -> str:
         self._counter += 1
         return f"task_{self._counter:04x}"
+
+    def set_name_registry(self, reg: Any) -> None:
+        """注入 AgentNameRegistry（Team 模块）。"""
+        self._name_reg = reg
+
+    def on_task_done(self, fn: Callable[[str], Awaitable[None]]) -> None:
+        """注册任务结束回调（task_id 入参）。"""
+        self._done_callbacks.append(fn)
+
+    def _register_name(self, name: str, task_id: str) -> None:
+        """name → id 注册：优先走 name_reg，本地 _by_name 兜底。"""
+        if self._name_reg is not None:
+            try:
+                self._name_reg.register(name, task_id)
+            except Exception:
+                pass
+        self._by_name[name] = task_id
+
+    def _resolve_name(self, name: str) -> str | None:
+        """name → id 解析：优先 name_reg。"""
+        if self._name_reg is not None:
+            try:
+                hit = self._name_reg.resolve(name)
+                if hit is not None:
+                    return hit
+            except Exception:
+                pass
+        return self._by_name.get(name)
 
     # ── 查询 ─────────────────────────────────────
 
@@ -114,9 +147,16 @@ class Manager:
         conv: Conversation,
         name: str,
         task_text: str,
+        task_id: str | None = None,
     ) -> str:
-        """起后台协程跑 run_to_completion，返回 task_id。"""
-        task_id = self._next_id()
+        """起后台协程跑 run_to_completion，返回 task_id。
+
+        task_id 可选：Team 模块用于把队员的 agent_id 与后台任务 id 统一。
+        """
+        if task_id is None:
+            task_id = self._next_id()
+        else:
+            self._counter += 1  # 保持单调递增避免后续 id 冲突
         bt = BackgroundTask(
             id=task_id,
             name=name,
@@ -129,7 +169,7 @@ class Manager:
         async with self._lock:
             self._tasks[task_id] = bt
             if name:
-                self._by_name[name] = task_id  # 后启动覆盖前
+                self._register_name(name, task_id)
 
         events: asyncio.Queue[Any] = asyncio.Queue(maxsize=64)
         aggregator = asyncio.create_task(self._aggregate_task_events(events, bt))
@@ -162,7 +202,7 @@ class Manager:
         async with self._lock:
             self._tasks[task_id] = bt
             if name:
-                self._by_name[name] = task_id
+                self._register_name(name, task_id)
 
         aggregator = asyncio.create_task(self._aggregate_task_events(events, bt))
         self._start_runner(bt, events, aggregator, "")
@@ -182,9 +222,7 @@ class Manager:
         """
         runner = asyncio.create_task(self._run_body(bt, events, task_text))
         bt.handle = runner
-        runner.add_done_callback(
-            lambda _t: asyncio.create_task(self._finalize(bt, events, aggregator))
-        )
+        runner.add_done_callback(lambda _t: asyncio.create_task(self._finalize(bt, events, aggregator)))
 
     async def _run_body(
         self,
@@ -232,6 +270,14 @@ class Manager:
                 f"task manager: done queue full, dropping notification for {bt.id}",
                 file=sys.stderr,
             )
+        for fn in list(self._done_callbacks):
+            try:
+                await fn(bt.id)
+            except Exception as e:
+                print(
+                    f"task manager: on_task_done callback failed for {bt.id}: {e}",
+                    file=sys.stderr,
+                )
 
     async def stop(self, task_id: str) -> bool:
         """触发取消；返回是否找到任务。"""
@@ -244,7 +290,7 @@ class Manager:
 
     async def send_message(self, name: str, message: str) -> str:
         """给一个已完成的同名后台任务续派新任务（同 id 复用）。"""
-        task_id = self._by_name.get(name)
+        task_id = self._resolve_name(name)
         if task_id is None:
             raise TaskNotFound(name)
         bt = self.get(task_id)
@@ -270,9 +316,7 @@ class Manager:
 
     # ── 事件聚合 ─────────────────────────────────
 
-    async def _aggregate_task_events(
-        self, events: asyncio.Queue[Any], bt: BackgroundTask
-    ) -> None:
+    async def _aggregate_task_events(self, events: asyncio.Queue[Any], bt: BackgroundTask) -> None:
         """消费 run_to_completion 转发的事件，聚合 tool_count / last_activity / usage。"""
         from forgecode.agent import Phase
 

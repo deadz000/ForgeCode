@@ -74,15 +74,11 @@ class Executor:
             return ExecutionResult(err=e)
 
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(payload_json), timeout=timeout
-            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(payload_json), timeout=timeout)
         except TimeoutError:
             proc.kill()
             await proc.wait()
-            return ExecutionResult(
-                err=TimeoutError(f"hook command timed out after {timeout}s")
-            )
+            return ExecutionResult(err=TimeoutError(f"hook command timed out after {timeout}s"))
 
         code = proc.returncode or 0
         if blocking and code == 2:
@@ -91,9 +87,7 @@ class Executor:
             return ExecutionResult(blocked=True, reason=reason)
         if code == 0:
             return ExecutionResult()
-        return ExecutionResult(
-            err=RuntimeError(f"exit {code}: {stderr.decode(errors='replace')}")
-        )
+        return ExecutionResult(err=RuntimeError(f"exit {code}: {stderr.decode(errors='replace')}"))
 
     def _run_prompt(self, pa: PromptAction) -> ExecutionResult:
         """prompt 动作：直接返回文本，交由 Engine 累加进 reminder 队列。"""
@@ -113,9 +107,7 @@ class Executor:
             try:
                 body = ha.body.format_map(payload)
             except (KeyError, IndexError, ValueError, TypeError) as e:
-                return ExecutionResult(
-                    err=RuntimeError(f"http body template render failed: {e}")
-                )
+                return ExecutionResult(err=RuntimeError(f"http body template render failed: {e}"))
 
         try:
             resp = await self._http_client.request(
@@ -134,9 +126,7 @@ class Executor:
             except json.JSONDecodeError as e:
                 return ExecutionResult(err=e)
             if isinstance(data, dict) and data.get("decision") == "block":
-                return ExecutionResult(
-                    blocked=True, reason=str(data.get("reason", ""))
-                )
+                return ExecutionResult(blocked=True, reason=str(data.get("reason", "")))
         return ExecutionResult()
 
     def _run_subagent(self, sa: SubagentAction) -> ExecutionResult:

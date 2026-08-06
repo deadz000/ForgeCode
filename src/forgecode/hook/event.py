@@ -22,9 +22,7 @@ class Event(str, enum.Enum):  # noqa: UP042 — 文档指定 str+Enum 形态，�
 
 
 # 拦截类事件：hook 可表达拦截信号，不允许 async
-BLOCKING_EVENTS: frozenset[Event] = frozenset(
-    {Event.PRE_TOOL_USE, Event.USER_PROMPT_SUBMIT}
-)
+BLOCKING_EVENTS: frozenset[Event] = frozenset({Event.PRE_TOOL_USE, Event.USER_PROMPT_SUBMIT})
 
 
 def is_blocking(e: Event) -> bool:

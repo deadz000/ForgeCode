@@ -127,7 +127,7 @@ class Loader:
             return ""
 
         # 二进制检测
-        if b"\x00" in raw[: _BINARY_THRESHOLD]:
+        if b"\x00" in raw[:_BINARY_THRESHOLD]:
             return f"<!-- @include 文件为二进制格式，已跳过: {abs_path} -->\n"
 
         try:

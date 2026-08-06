@@ -16,7 +16,7 @@ from forgecode.permission import Mode
 
 
 def test_register_builtins_all_registered():
-    """注册后 visible() 含 14 条命令，名字完整且按字典序。"""
+    """注册后 visible() 含 15 条命令，名字完整且按字典序。"""
     reg = Registry()
     register_builtins(reg)
     visible = reg.visible()
@@ -35,9 +35,10 @@ def test_register_builtins_all_registered():
         "session",
         "skill",
         "status",
+        "team",
         "worktree",
     ]
-    assert len(visible) == 14
+    assert len(visible) == 15
     assert names == expected
 
 
@@ -45,7 +46,7 @@ def test_register_builtins_no_collision():
     """直接调 register_builtins 不抛异常。"""
     reg = Registry()
     register_builtins(reg)
-    assert len(reg.visible()) == 14
+    assert len(reg.visible()) == 15
 
 
 # ── NopUI 不抛 ──

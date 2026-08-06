@@ -123,10 +123,16 @@ class Registry:
         return t is not None and getattr(t, "is_system", False)
 
     def definitions(self) -> list[ToolDefinition]:
-        """按注册顺序导出所有工具定义（F3）。"""
+        """按注册顺序导出所有工具定义（F3）。
+
+        跳过 is_teammate_only 工具——主 Agent 视角不可见（Team 队员经
+        definitions_filtered 显式白名单可见）。
+        """
         result: list[ToolDefinition] = []
         for name in self._order:
             tool = self._tools[name]
+            if getattr(tool, "is_teammate_only", False):
+                continue
             result.append(
                 ToolDefinition(
                     name=tool.name(),
@@ -137,10 +143,12 @@ class Registry:
         return result
 
     def read_only_definitions(self) -> list[ToolDefinition]:
-        """Plan Mode：只导出 read_only==True 的工具定义。"""
+        """Plan Mode：只导出 read_only==True 的工具定义（跳过 teammate-only）。"""
         result: list[ToolDefinition] = []
         for name in self._order:
             tool = self._tools[name]
+            if getattr(tool, "is_teammate_only", False):
+                continue
             if getattr(tool, "read_only", False):
                 result.append(
                     ToolDefinition(

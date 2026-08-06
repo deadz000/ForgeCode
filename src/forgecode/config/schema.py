@@ -1,9 +1,17 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from forgecode.config.protocol_defaults import (
     DEFAULT_ANTHROPIC_CONTEXT_WINDOW,
     DEFAULT_OPENAI_CONTEXT_WINDOW,
 )
+
+
+@dataclass
+class FeaturesConfig:
+    """特性开关（YAML key: features: 段）。"""
+
+    coordinator_mode: bool = False  # Coordinator Mode（双锁：还需环境变量）
+    fork_teammate: bool = False  # Team 队员 Fork 路径（默认关）
 
 
 @dataclass
@@ -43,6 +51,7 @@ class AppConfig:
     active_provider_name: str
     # SubAgent 后台能力开关（YAML key: enableSubAgentBackground）。None=默认开启
     enable_subagent_background: bool | None = None
+    features: FeaturesConfig = field(default_factory=FeaturesConfig)
 
     def effective_enable_subagent_background(self) -> bool:
         """返回是否启用后台：None 视为 True（N6）。"""

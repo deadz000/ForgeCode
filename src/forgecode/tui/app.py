@@ -1,4 +1,4 @@
-﻿"""TUI 主应用：终端界面渲染、输入处理、命令分发、Agent 集成。"""
+"""TUI 主应用：终端界面渲染、输入处理、命令分发、Agent 集成。"""
 
 from __future__ import annotations
 
@@ -101,6 +101,8 @@ class ForgeApp:
         task_mgr=None,
         subagent_catalog=None,
         worktree_mgr=None,
+        team_mgr=None,
+        coordinator_mode: bool = False,
     ) -> None:
         self.config = config
         self.provider = provider
@@ -139,6 +141,13 @@ class ForgeApp:
         self.task_mgr = task_mgr
         self.subagent_catalog = subagent_catalog
         self.worktree_mgr = worktree_mgr
+        self.team_mgr = team_mgr
+        self.coordinator_mode = coordinator_mode
+        # Lead 邮箱自动唤醒信号（consume_lead_mail 置位）
+        self.lead_mail_event: asyncio.Event = asyncio.Event()
+        # Lead 邮箱后台消费/唤醒协程（run_async 启动）
+        self._consume_lead = None
+        self._lead_wait = None
         # 当前 Worktree 会话的 cwd（空表示进程 cwd）；/worktree enter 后设置
         self.active_cwd: str = ""
         if worktree_mgr is not None:
@@ -217,6 +226,12 @@ class ForgeApp:
                 catalog=self.catalog,
                 hook_engine=self.hook_engine,
             )
+            # Coordinator Mode：收窄工具集 + 追加纪律提示词（F54）
+            if self.coordinator_mode:
+                from forgecode.coordinator import allowed_tools, system_prompt_suffix
+
+                self._agent.set_allowed_tools(allowed_tools())
+                self._agent.append_system_prompt(system_prompt_suffix())
             # 把 Agent 工具绑定到主 Agent（parent 反推 + 父对话获取）
             agent_tool = self.registry.get("Agent")
             if agent_tool is not None and hasattr(agent_tool, "set_parent"):
@@ -248,7 +263,6 @@ class ForgeApp:
     def set_mode(self, m: Mode) -> None:
         """设置权限模式。"""
         self.mode = m
-
 
     def list_catalog_skills(self) -> list:
         if self.catalog is None:
@@ -289,6 +303,10 @@ class ForgeApp:
         """主 Agent Run 的 ctx cwd：优先 active_cwd，否则进程 cwd。"""
         return self.active_cwd or str(os.getcwd())
 
+    def team_manager(self):
+        """返回 Team Manager；未启用时返回 None（/team 命令用）。"""
+        return self.team_mgr
+
     # ── Skill fork 需要（UI Protocol 缺失补齐）──
 
     async def append_assistant_message(self, text: str) -> None:
@@ -318,6 +336,46 @@ class ForgeApp:
                 continue
             notif = build_task_notification(bt)
             self.runtime.append_reminders([notif])
+
+    # ── Lead 邮箱消费与自动唤醒（F41a/F41b）──────────
+
+    async def _consume_lead_mail(self) -> None:
+        """每秒轮询 Lead 邮箱，未读消息转 <team-update> reminder + 触发唤醒信号。"""
+        if self.team_mgr is None or self.runtime is None:
+            return
+        from forgecode.tui.tasks import build_team_update_reminder
+
+        while True:
+            try:
+                await asyncio.sleep(1.0)
+                msgs = await self.team_mgr.poll_lead_mailboxes()
+                if not msgs:
+                    continue
+                reminder = build_team_update_reminder(msgs)
+                self.runtime.append_reminders([reminder])
+                self.lead_mail_event.set()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                continue
+
+    async def _wait_for_lead_mail(self) -> None:
+        """阻塞在 lead_mail_event 上；空闲时自动开新轮处理队员消息。"""
+        while True:
+            await self.lead_mail_event.wait()
+            self.lead_mail_event.clear()
+            if not self._agent_running:
+                await self._begin_autonomous_turn()
+
+    async def _begin_autonomous_turn(self) -> None:
+        """合成 user 消息自动开一轮（Lead 空闲时队员有更新）。"""
+        text = "[team-update] 队员发来新消息，请按 Coordinator 流程处理。"
+        self.console.print()
+        self.console.print(f"[bold cyan]user:[/bold cyan] {text}")
+        try:
+            await self._submit(text)
+        except asyncio.CancelledError:
+            pass
 
     def inject_and_send(self, display_label: str, preset_prompt: str) -> None:
         """向对话注入一条 user 消息并立即触发 Agent 回合。"""
@@ -464,21 +522,15 @@ class ForgeApp:
 
     async def _dispatch_session_start(self) -> None:
         """SessionStart：进程启动 / /clear 新建会话后。"""
-        await self._dispatch_hook(
-            HookEvent.SESSION_START, self._base_payload(HookEvent.SESSION_START)
-        )
+        await self._dispatch_hook(HookEvent.SESSION_START, self._base_payload(HookEvent.SESSION_START))
 
     async def _dispatch_session_end(self) -> None:
         """SessionEnd：进程关闭 / 会话切换离开前。"""
-        await self._dispatch_hook(
-            HookEvent.SESSION_END, self._base_payload(HookEvent.SESSION_END)
-        )
+        await self._dispatch_hook(HookEvent.SESSION_END, self._base_payload(HookEvent.SESSION_END))
 
     async def _dispatch_session_resume(self) -> None:
         """SessionResume：历史会话恢复完成后。"""
-        await self._dispatch_hook(
-            HookEvent.SESSION_RESUME, self._base_payload(HookEvent.SESSION_RESUME)
-        )
+        await self._dispatch_hook(HookEvent.SESSION_RESUME, self._base_payload(HookEvent.SESSION_RESUME))
 
     # ── 遗留命令 handler（hidden=True，仅供 cmd_registry 引用）──
 
@@ -520,7 +572,8 @@ class ForgeApp:
             elapsed = "..."
         mcp_line = self._mcp_summary()
         mcp_str = f" | {mcp_line}" if mcp_line else ""
-        return f" {mode_label} │ {model_name} │ {tok_str} │ {elapsed} " + mcp_str + " "
+        coord_str = " | [COORDINATOR]" if self.coordinator_mode else ""
+        return f" {mode_label} │ {model_name} │ {tok_str} │ {elapsed} " + mcp_str + coord_str + " "
 
     def _make_input(self):
         """构造输入读取器：让 Windows 下 Shift+Enter 识别为换行。
@@ -553,10 +606,7 @@ class ForgeApp:
 
                 def _event_to_key_presses(self, ev):
                     result = super()._event_to_key_presses(ev)
-                    if (
-                        ev.ControlKeyState & _shift_pressed
-                        and ev.VirtualKeyCode == _vk_return
-                    ):
+                    if ev.ControlKeyState & _shift_pressed and ev.VirtualKeyCode == _vk_return:
                         return [KeyPress(Keys.ControlJ, "\n")]
                     return result
 
@@ -710,6 +760,9 @@ class ForgeApp:
         await self._dispatch_session_start()
         if self.task_mgr is not None:
             self._consume_task = asyncio.create_task(self._consume_task_done())
+        if self.team_mgr is not None:
+            self._consume_lead = asyncio.create_task(self._consume_lead_mail())
+            self._lead_wait = asyncio.create_task(self._wait_for_lead_mail())
 
         input_app = self._build_input_app()
 
@@ -750,6 +803,10 @@ class ForgeApp:
         await self._dispatch_session_end()
         if self._consume_task is not None:
             self._consume_task.cancel()
+        if self._consume_lead is not None:
+            self._consume_lead.cancel()
+        if self._lead_wait is not None:
+            self._lead_wait.cancel()
 
     # ── 命令分发 ──────────────────────────────────
 
@@ -948,9 +1005,7 @@ class ForgeApp:
                 {**self._base_payload(HookEvent.USER_PROMPT_SUBMIT), "prompt": text},
             )
             if result.blocked:
-                self.console.print(
-                    f"[red][hook {result.blocking_hook_name}] {result.reason}[/red]"
-                )
+                self.console.print(f"[red][hook {result.blocking_hook_name}] {result.reason}[/red]")
                 return  # 不消费输入
             self.conversation.add_user(text)
 

@@ -106,9 +106,7 @@ async def _run_connection(mgr: Manager, name: str, srv: ServerConfig, version: s
         await transport_ctx.__aexit__(None, None, None)
 
 
-async def _connect_and_init(
-    mgr: Manager, name: str, srv: ServerConfig, version: str
-) -> tuple:
+async def _connect_and_init(mgr: Manager, name: str, srv: ServerConfig, version: str) -> tuple:
     """连接 MCP server 并完成握手、列工具。30s 超时，失败返回 (None, None, [])。"""
     try:
         return await asyncio.wait_for(
@@ -116,9 +114,9 @@ async def _connect_and_init(
             timeout=connect_timeout,
         )
     except TimeoutError:
-                logger.warning(f"mcp server {name} connect timeout after {connect_timeout}s")
+        logger.warning(f"mcp server {name} connect timeout after {connect_timeout}s")
     except Exception as e:
-        logger.warning(f'mcp server {name} connect failed: {e}')
+        logger.warning(f"mcp server {name} connect failed: {e}")
     return None, None, []
 
 

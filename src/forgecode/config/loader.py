@@ -6,7 +6,7 @@ from pathlib import Path
 
 import yaml
 
-from forgecode.config.schema import AppConfig, ProviderConfig
+from forgecode.config.schema import AppConfig, FeaturesConfig, ProviderConfig
 
 
 def _global_config_path() -> Path:
@@ -110,8 +110,19 @@ def load_config(provider_name: str | None = None) -> AppConfig:
             bg = bool(data["enableSubAgentBackground"])
             break
 
+    # features 段：项目级优先，其次全局
+    features = FeaturesConfig()
+    for data in (project_data, global_data):
+        if data is not None and isinstance(data.get("features"), dict):
+            try:
+                features = FeaturesConfig(**data["features"])
+            except TypeError:
+                pass
+            break
+
     return AppConfig(
         providers=providers,
         active_provider_name=active_name,
         enable_subagent_background=bg,
+        features=features,
     )

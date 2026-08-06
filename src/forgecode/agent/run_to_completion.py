@@ -14,9 +14,7 @@ from forgecode.permission import Mode, Outcome
 
 # 嵌套阻断上下文标记：进入子 Agent 循环期间置 True，
 # Agent 工具入口据此拦截「子 Agent 再启动 Agent」（替代文档的 QuerySource）。
-IN_SUBAGENT: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "forgecode_in_subagent", default=False
-)
+IN_SUBAGENT: contextvars.ContextVar[bool] = contextvars.ContextVar("forgecode_in_subagent", default=False)
 
 
 class MaxTurnsReached(Exception):  # noqa: N818 — 文档 API 命名（spec F9）

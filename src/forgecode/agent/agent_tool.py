@@ -16,6 +16,11 @@ from typing import TYPE_CHECKING, Any, Protocol
 from forgecode.agent import Agent
 from forgecode.agent.fork import build_forked_messages, is_fork_context
 from forgecode.agent.run_to_completion import IN_SUBAGENT
+from forgecode.agent.team_hook import (
+    TeamHook,
+    TeamSpawnRequest,
+    teammate_context_from_ctx,
+)
 from forgecode.conversation.history import Conversation
 from forgecode.subagent import Definition
 from forgecode.tool import Result
@@ -56,6 +61,7 @@ class AgentArgs:
     model: str = ""
     run_in_background: bool = False
     name: str = ""
+    team_name: str = ""
 
 
 class AgentTool:
@@ -68,12 +74,14 @@ class AgentTool:
         parent: Agent | None = None,
         bg_enabled: bool = True,
         worktree_mgr: Manager | None = None,
+        team_hook: TeamHook | None = None,
     ) -> None:
         self._catalog = catalog
         self._task_mgr = task_mgr
         self._parent = parent
         self._bg_enabled = bg_enabled
         self.worktree_mgr: Manager | None = worktree_mgr
+        self.team_hook: TeamHook | None = team_hook
         self._get_parent_conv: Callable[[], Conversation] | None = None
 
     read_only = False
@@ -96,7 +104,7 @@ class AgentTool:
     def description(self) -> str:
         names = ", ".join(d.name for d in self._catalog.list())
         base = "启动一个子 Agent 处理独立任务；subagent_type 指定预定义角色，留空走 Fork 路径"
-        return f"{base}；可用 subagent_type: {names}"
+        return f"{base}；可用 subagent_type: {names}；team_name 非空时把该成员作为 Team 队员 spawn"
 
     def parameters(self) -> dict[str, Any]:
         return {
@@ -114,6 +122,10 @@ class AgentTool:
                 "model": {"type": "string", "description": "模型覆盖：haiku/sonnet/opus/inherit"},
                 "run_in_background": {"type": "boolean", "description": "true 时强制后台启动"},
                 "name": {"type": "string", "description": "给本次子 Agent 命名，供 SendMessage 使用"},
+                "team_name": {
+                    "type": "string",
+                    "description": "非空时把该成员作为指定 Team 的队员 spawn（Team 上下文外不可用）",
+                },
             },
             "required": ["prompt"],
         }
@@ -135,13 +147,14 @@ class AgentTool:
             model=str(data.get("model", "")),
             run_in_background=bool(data.get("run_in_background", False)),
             name=str(data.get("name", "")),
+            team_name=str(data.get("team_name", "")),
         )
         if not a_args.prompt:
             return Result(
                 content=(
                     "缺少必填参数 prompt。请把要交给子 Agent 的完整任务指令写入 prompt 字段。"
-                    " 格式示例：{\"prompt\": \"统计 src/ 下所有 .py 文件行数\","
-                    " \"subagent_type\": \"Explore\"}"
+                    ' 格式示例：{"prompt": "统计 src/ 下所有 .py 文件行数",'
+                    ' "subagent_type": "Explore"}'
                 ),
                 is_error=True,
             )
@@ -149,12 +162,14 @@ class AgentTool:
             # 自动兜底：截取 prompt 首行前 80 字，避免 LLM 反复重试
             a_args.description = a_args.prompt.strip().split("\n")[0][:80]
 
+        # ── Team spawn 分支 ──
+        if a_args.team_name:
+            return await self._execute_team_spawn(a_args)
+
         # ── 嵌套阻断 ──
         if IN_SUBAGENT.get():
             return Result(content="subagent cannot spawn Agent", is_error=True)
-        parent_msgs: list[Any] = (
-            self._get_parent_conv().messages if self._get_parent_conv is not None else []
-        )
+        parent_msgs: list[Any] = self._get_parent_conv().messages if self._get_parent_conv is not None else []
         if is_fork_context(parent_msgs):
             return Result(
                 content="Fork subagent cannot spawn Agent (boilerplate detected)",
@@ -233,9 +248,7 @@ class AgentTool:
 
         # ── 后台路径 ──
         if background:
-            task_id = await self._task_mgr.launch(
-                sub_agent, sub_conv, a_args.name, a_args.prompt
-            )
+            task_id = await self._task_mgr.launch(sub_agent, sub_conv, a_args.name, a_args.prompt)
             return Result(content=json.dumps({"task_id": task_id, "status": "async_launched"}))
 
         # ── 前台路径（超时自动切后台）──
@@ -266,12 +279,8 @@ class AgentTool:
                     timeout=AUTO_BACKGROUND_SECONDS,
                 )
         except TimeoutError:
-            task_id = await self._task_mgr.adopt_running(
-                sub_agent, sub_conv, a_args.name, events, partial
-            )
-            return Result(
-                content=json.dumps({"task_id": task_id, "status": "timed_out_to_background"})
-            )
+            task_id = await self._task_mgr.adopt_running(sub_agent, sub_conv, a_args.name, events, partial)
+            return Result(content=json.dumps({"task_id": task_id, "status": "timed_out_to_background"}))
         except Exception as e:
             return Result(content=f"subagent error: {e}", is_error=True)
         finally:
@@ -281,6 +290,30 @@ class AgentTool:
             except asyncio.QueueFull:
                 pass
 
+        return Result(content=final_text)
+
+    async def _execute_team_spawn(self, a_args: AgentArgs) -> Result:
+        """Team spawn 分支：委托 team_hook.spawn_teammate（F25）。"""
+        if self.team_hook is None:
+            return Result(content="Team 功能未配置（team_hook 缺失）", is_error=True)
+        tc = teammate_context_from_ctx()
+        if tc is not None and tc.backend_type == "in-process":
+            return Result(
+                content="in-process 队员不能再次 spawn 队员（InProcessTeammateNoSpawnError）",
+                is_error=True,
+            )
+        req = TeamSpawnRequest(
+            team_name=a_args.team_name,
+            member_name=a_args.name or "",
+            agent_type=a_args.subagent_type,
+            model=a_args.model,
+            prompt=a_args.prompt,
+            plan_mode_required=False,
+        )
+        try:
+            final_text = await self.team_hook.spawn_teammate(req)
+        except Exception as e:
+            return Result(content=f"Team spawn 失败: {e}", is_error=True)
         return Result(content=final_text)
 
 

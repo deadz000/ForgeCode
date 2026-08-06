@@ -35,10 +35,33 @@ from forgecode.task import (
     Manager as TaskManager,
 )
 from forgecode.task import (
-    SendMessageTool,
-    TaskGetTool,
-    TaskListTool,
+    SendMessageTool as TaskSendMessageTool,
+)
+from forgecode.task import (
+    TaskGetTool as TaskGetBackgroundTool,
+)
+from forgecode.task import (
+    TaskListTool as TaskListBackgroundTool,
+)
+from forgecode.task import (
     TaskStopTool,
+)
+from forgecode.team import Manager as TeamManager
+from forgecode.team.registry import AgentNameRegistry
+from forgecode.team.tools import (
+    SendMessageTool as TeamSendMessageTool,
+)
+from forgecode.team.tools import (
+    TaskCreateTool,
+    TaskUpdateTool,
+    TeamCreateTool,
+    TeamDeleteTool,
+)
+from forgecode.team.tools import (
+    TaskGetTool as TeamTaskGetTool,
+)
+from forgecode.team.tools import (
+    TaskListTool as TeamTaskListTool,
 )
 from forgecode.tool import new_default_registry
 from forgecode.tool.install_skill import InstallSkillTool
@@ -58,6 +81,16 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="指定使用的供应商名称（不指定则使用第一个）",
     )
+    # ── Team 队员子进程模式（Pane 后端 spawn 用）──
+    parser.add_argument("--team-member", action="store_true", help="以 Team 队员模式运行（Pane 后端子进程）")
+    parser.add_argument("--team", type=str, default="", help="队员所属 Team（--team-member）")
+    parser.add_argument("--member", type=str, default="", help="队员名（--team-member）")
+    parser.add_argument("--agent-id", type=str, default="", help="队员 agent_id（--team-member）")
+    parser.add_argument("--session-dir", type=str, default="", help="队员 session 目录（--team-member）")
+    parser.add_argument("--worktree", type=str, default="", help="队员 worktree 路径（--team-member）")
+    parser.add_argument("--agent-type", type=str, default="", help="队员角色定义名（--team-member）")
+    parser.add_argument("--model", type=str, default="", help="模型覆盖（--team-member）")
+    parser.add_argument("--plan-mode", action="store_true", help="以 plan 模式起步（--team-member）")
     return parser.parse_args()
 
 
@@ -103,12 +136,12 @@ def cli() -> None:
 
     # 启动异步主流程（含 MCP 连接 + TUI）
     try:
-        asyncio.run(_amain(app_config, provider, conversation, registry, runtime))
+        asyncio.run(_amain(app_config, provider, conversation, registry, runtime, args))
     except KeyboardInterrupt:
         pass
 
 
-async def _amain(app_config, provider, conversation, registry, runtime) -> None:
+async def _amain(app_config, provider, conversation, registry, runtime, args) -> None:
     """异步主流程：MCP 连接 → 注册工具 → 启动 TUI → 关闭 MCP。"""
     root = os.getcwd()
     user_home = os.path.expanduser("~")
@@ -177,10 +210,30 @@ async def _amain(app_config, provider, conversation, registry, runtime) -> None:
             # 后台跑一次过期临时 Worktree 清理，不阻塞启动
             asyncio.create_task(worktree_mgr.sweep_stale(datetime.now() - timedelta(hours=24)))
 
-        registry.register(TaskListTool(task_mgr))
-        registry.register(TaskGetTool(task_mgr))
+        # ── Team 管理器 + 名称注册表（失败降级 None，不阻断启动）──
+        name_reg = AgentNameRegistry()
+        task_mgr.set_name_registry(name_reg)
+        try:
+            team_mgr = TeamManager(user_home, root, worktree_mgr, task_mgr, name_reg)
+        except Exception as exc:
+            print(f"Team 管理器降级: {exc}", file=sys.stderr)
+            team_mgr = None
+        if team_mgr is not None:
+            team_mgr.bind_spawn_deps(
+                provider=provider,
+                engine=engine,
+                registry=registry,
+                catalog=subagent_catalog,
+                version=VERSION,
+                hook_engine=hook_engine,
+                fork_enabled=getattr(app_config.features, "fork_teammate", False),
+            )
+
+        # ── 注册工具 ──
+        registry.register(TaskListBackgroundTool(task_mgr))
+        registry.register(TaskGetBackgroundTool(task_mgr))
         registry.register(TaskStopTool(task_mgr))
-        registry.register(SendMessageTool(task_mgr))
+        registry.register(TaskSendMessageTool(task_mgr))
         registry.register(
             AgentTool(
                 subagent_catalog,
@@ -188,8 +241,27 @@ async def _amain(app_config, provider, conversation, registry, runtime) -> None:
                 parent=None,
                 bg_enabled=app_config.effective_enable_subagent_background(),
                 worktree_mgr=worktree_mgr,
+                team_hook=team_mgr,  # type: ignore[arg-type]
             )
         )
+
+        if team_mgr is not None:
+            # Team 管理工具（主 Agent 可见）
+            registry.register(TeamCreateTool(team_mgr))
+            registry.register(TeamDeleteTool(team_mgr))
+            registry.register(TaskCreateTool(team_mgr))
+            registry.register(TaskUpdateTool(team_mgr))
+            # 协作工具覆盖 ch13 同名（保留 fallback 分流）
+            registry.register_skill_tool(TeamTaskListTool(team_mgr, fallback=registry.get("TaskList")))
+            registry.register_skill_tool(TeamTaskGetTool(team_mgr, fallback=registry.get("TaskGet")))
+            registry.register_skill_tool(TeamSendMessageTool(team_mgr, fallback=registry.get("SendMessage")))
+
+            # 队员结束 → is_active=False + Lead idle 通知
+            async def _on_team_task_done(task_id: str) -> None:
+                if team_mgr is not None:
+                    await team_mgr.handle_task_done(task_id)
+
+            task_mgr.on_task_done(_on_team_task_done)
 
         if runtime.active_skills is None:
             runtime.active_skills = ActiveSkills()
@@ -246,6 +318,34 @@ async def _amain(app_config, provider, conversation, registry, runtime) -> None:
         install_tool._on_reloaded = _reload_skill_commands
         register_skills_as_commands(cmd_reg, summaries, executor)
 
+        # ── --team-member：子进程自治循环，不构造 TUI ──
+        if args.team_member:
+            from forgecode.team_member import run_team_member
+
+            await run_team_member(
+                {
+                    "args": args,
+                    "provider": provider,
+                    "registry": registry,
+                    "engine": engine,
+                    "hook_engine": hook_engine,
+                    "subagent_catalog": subagent_catalog,
+                    "team_mgr": team_mgr,
+                    "task_mgr": task_mgr,
+                    "version": VERSION,
+                    "writer": writer,
+                    "runtime": runtime,
+                }
+            )
+            return
+
+        # ── Coordinator Mode 检测（双锁）──
+        coordinator_mode = False
+        from forgecode.coordinator import is_enabled as _coord_enabled
+
+        if _coord_enabled(app_config):
+            coordinator_mode = True
+
         app = ForgeApp(
             config=app_config,
             provider=provider,
@@ -265,6 +365,8 @@ async def _amain(app_config, provider, conversation, registry, runtime) -> None:
             task_mgr=task_mgr,
             subagent_catalog=subagent_catalog,
             worktree_mgr=worktree_mgr,
+            team_mgr=team_mgr,
+            coordinator_mode=coordinator_mode,
         )
         app_finished = False
         try:
@@ -275,9 +377,7 @@ async def _amain(app_config, provider, conversation, registry, runtime) -> None:
                 # 兜底 SessionEnd（Ctrl+C / 异常路径未走到 run_async 末尾）
                 payload = {
                     "event": "SessionEnd",
-                    "session_id": runtime.session.session_id
-                    if runtime and runtime.session
-                    else "",
+                    "session_id": runtime.session.session_id if runtime and runtime.session else "",
                     "cwd": os.getcwd(),
                     "mode": app.mode.name.lower() if app.mode else "default",
                 }
