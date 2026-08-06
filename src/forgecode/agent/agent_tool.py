@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
@@ -62,6 +63,8 @@ class AgentArgs:
     run_in_background: bool = False
     name: str = ""
     team_name: str = ""
+    isolation: str = ""
+    plan_mode_required: bool = False
 
 
 class AgentTool:
@@ -126,6 +129,15 @@ class AgentTool:
                     "type": "string",
                     "description": "非空时把该成员作为指定 Team 的队员 spawn（Team 上下文外不可用）",
                 },
+                "isolation": {
+                    "type": "string",
+                    "enum": ["", "worktree"],
+                    "description": "是否在独立 Git Worktree 副本中运行：worktree 隔离执行；空=共享目录。角色定义强制 isolation 时此参数被忽略",
+                },
+                "plan_mode_required": {
+                    "type": "boolean",
+                    "description": "true 时强制该 Team 队员以 plan 模式启动（仅 team_name 分支生效）。角色定义 permissionMode: plan 时此参数被忽略",
+                },
             },
             "required": ["prompt"],
         }
@@ -148,7 +160,15 @@ class AgentTool:
             run_in_background=bool(data.get("run_in_background", False)),
             name=str(data.get("name", "")),
             team_name=str(data.get("team_name", "")),
+            isolation=str(data.get("isolation", "")),
+            plan_mode_required=bool(data.get("plan_mode_required", False)),
         )
+        if a_args.isolation not in ("", "worktree"):
+            print(
+                f'agent tool: unknown isolation {a_args.isolation!r}, defaulting to no isolation',
+                file=sys.stderr,
+            )
+            a_args.isolation = ""
         if not a_args.prompt:
             return Result(
                 content=(
@@ -186,14 +206,18 @@ class AgentTool:
 
         # ── 决定后台 ──
         background = defi.background or a_args.run_in_background or defi.is_fork()
-        if background and not self._bg_enabled:
-            return Result(content="background mode is disabled by config", is_error=True)
+
+        # ── 决定隔离：定义强制优先，未定义时由调用参数决定 ──
+        effective_isolation = defi.isolation or a_args.isolation
 
         # ── isolation:worktree → 强制前台（本期最小实现，spec F23）──
-        if defi.isolation == "worktree":
+        if effective_isolation == "worktree":
             if self.worktree_mgr is None:
                 return Result(content="worktree manager not configured", is_error=True)
             background = False
+
+        if background and not self._bg_enabled:
+            return Result(content="background mode is disabled by config", is_error=True)
 
         # ── 工具过滤（多层防线）──
         names = [d.name for d in parent._registry.definitions()]
@@ -261,7 +285,7 @@ class AgentTool:
         partial = PartialState()
         aggregator = asyncio.create_task(_aggregate_partial(events, partial))
         try:
-            if defi.isolation == "worktree":
+            if effective_isolation == "worktree":
                 from forgecode.agent.agent_worktree import _execute_with_worktree
 
                 assert self.worktree_mgr is not None
@@ -308,7 +332,7 @@ class AgentTool:
             agent_type=a_args.subagent_type,
             model=a_args.model,
             prompt=a_args.prompt,
-            plan_mode_required=False,
+            plan_mode_required=a_args.plan_mode_required,
         )
         try:
             final_text = await self.team_hook.spawn_teammate(req)
