@@ -197,7 +197,11 @@ async def spawn_teammate(mgr: Any, req: TeamSpawnRequest) -> str:
         sr.conv = sub_conv
         sr.task_mgr = mgr.task_mgr
 
-        with with_teammate_context(tc):
+        from forgecode.tool.ctx import with_cwd
+
+        # in-process 队员在 worktree 内运行（AC25）：ctx cwd 注入后，
+        # 工具 resolve_path / bash 子进程都落到 worktree，实现文件系统隔离。
+        with with_cwd(wt.path), with_teammate_context(tc):
             pane_id, _ = await be.spawn(sr)
     else:
         # ── Pane 后端：预写 mailbox（F13）──

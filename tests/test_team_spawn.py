@@ -42,9 +42,12 @@ class _FakeProvider:
         yield  # pragma: no cover
 
 
-def _wire(git_repo: Path) -> tuple[TeamManager, TaskManager, WorktreeManager, AgentNameRegistry]:
+def _wire(
+    git_repo: Path, tm: TaskManager | None = None
+) -> tuple[TeamManager, TaskManager, WorktreeManager, AgentNameRegistry]:
     home = git_repo.parent / "home"
-    tm = TaskManager()
+    if tm is None:
+        tm = TaskManager()
     name_reg = AgentNameRegistry()
     tm.set_name_registry(name_reg)
     wt = WorktreeManager(str(git_repo))
@@ -61,6 +64,20 @@ def _wire(git_repo: Path) -> tuple[TeamManager, TaskManager, WorktreeManager, Ag
         fork_enabled=False,
     )
     return team_mgr, tm, wt, name_reg
+
+
+class _RecordingTaskMgr(TaskManager):
+    """记录 launch 时 ctx cwd，用于断言队员工作目录。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cwd_at_launch: str | None = None
+
+    async def launch(self, ag, conv, name, task, task_id=None):
+        from forgecode.tool.ctx import cwd_from_ctx
+
+        self.cwd_at_launch = cwd_from_ctx()
+        return await super().launch(ag, conv, name, task, task_id=task_id)
 
 
 async def test_inprocess_spawn_full(git_repo: Path) -> None:
@@ -90,7 +107,7 @@ async def test_inprocess_spawn_full(git_repo: Path) -> None:
     assert mem is not None
     assert mem.agent_id == payload["agent_id"]
     # worktree 目录存在（嵌套 slug → team-demo+alice）
-    assert (Path(payload["worktree"]).is_dir())
+    assert Path(payload["worktree"]).is_dir()
     # 名称注册
     assert name_reg.resolve("alice") == payload["agent_id"]
     # 后台 task 用 agent_id 作为 id
@@ -101,11 +118,15 @@ async def test_spawn_member_name_conflict(git_repo: Path) -> None:
     team_mgr, _, _, _ = _wire(git_repo)
     await team_mgr.create("demo")
     await team_mgr.spawn_teammate(
-        TeamSpawnRequest(team_name="demo", member_name="alice", agent_type="general-purpose", model="", prompt="x")
+        TeamSpawnRequest(
+            team_name="demo", member_name="alice", agent_type="general-purpose", model="", prompt="x"
+        )
     )
     with pytest.raises(Exception):
         await team_mgr.spawn_teammate(
-            TeamSpawnRequest(team_name="demo", member_name="alice", agent_type="general-purpose", model="", prompt="y")
+            TeamSpawnRequest(
+                team_name="demo", member_name="alice", agent_type="general-purpose", model="", prompt="y"
+            )
         )
 
 
@@ -117,10 +138,27 @@ async def test_spawn_unknown_team(git_repo: Path) -> None:
         )
 
 
+async def test_inprocess_teammate_cwd_is_worktree(git_repo: Path) -> None:
+    """AC25：in-process 队员的 ctx cwd 必须指向其 worktree，而非主仓库。"""
+    tm = _RecordingTaskMgr()
+    team_mgr, _, _, _ = _wire(git_repo, tm)
+    await team_mgr.create("demo")
+    await team_mgr.spawn_teammate(
+        TeamSpawnRequest(
+            team_name="demo",
+            member_name="alice",
+            agent_type="general-purpose",
+            model="",
+            prompt="改文件",
+        )
+    )
+    assert tm.cwd_at_launch is not None
+    assert "team-demo+alice" in tm.cwd_at_launch
+
+
 async def test_lifecycle_idle_and_resume(git_repo: Path) -> None:
     """AC17/AC18：spawn → 自然结束 → is_active=False + Lead idle 消息 → SendMessage 续派。"""
     team_mgr, tm, _, name_reg = _wire(git_repo)
-    from forgecode.team.types import TeammateInfo
 
     # 注册 on_task_done（main.py wire 等价物）
     async def _on_done(task_id: str) -> None:
