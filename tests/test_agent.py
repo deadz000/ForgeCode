@@ -476,6 +476,100 @@ async def test_cancel_history_consistency():
     assert has_tool or any(NOTICE_CANCELLED in m.content for m in conv.messages if m.role == "assistant")
 
 
+@pytest.mark.asyncio
+async def test_interrupt_during_tool_execution_preserves_history():
+    """工具执行中 KeyboardInterrupt（Ctrl+C 实际中断路径）不破坏会话：
+
+    assistant tool_calls 消息后面必须有 tool 结果回灌，否则下一轮请求报错、
+    会话永久不可用（回归 bug：_execute_batched 被中断导致 add_tool_results 从未执行）。
+    """
+    registry = Registry()
+
+    class InterruptTool:
+        read_only = False  # 写工具走串行分支（用户 Ctrl+C 真实场景：bash 等有副作用工具）
+
+        def name(self) -> str:
+            return "boom"
+
+        def description(self) -> str:
+            return "interrupts"
+
+        def parameters(self) -> dict:
+            return {"type": "object", "properties": {}}
+
+        async def execute(self, args: str) -> Result:
+            raise KeyboardInterrupt()
+
+    registry.register(InterruptTool())
+
+    provider = FakeProvider()
+    provider.set_scripts(
+        [
+            [
+                StreamEvent(tool_calls=[ToolCall(id="c1", name="boom", input="{}")]),
+                StreamEvent(done=True),
+            ]
+        ]
+    )
+
+    agent = Agent(provider, registry, _test_engine(), "test")
+    conv = Conversation()
+    conv.add_user("interrupt test")
+
+    # 工具执行中被打断：gather 会把 KeyboardInterrupt 转成 CancelledError，
+    # 故兼容捕获两者，重点是对话结构必须闭合。
+    exc: BaseException | None = None
+    try:
+        async for _ in agent.run(conv, Mode.BYPASS, asyncio.Event()):
+            pass
+    except BaseException as e:  # noqa: BLE001 - 测试需要捕获中断类异常
+        exc = e
+
+    assert exc is not None
+    # 对话结构闭合：最后一条必须是 tool 结果消息（配对 assistant 的 tool_calls）。
+    # 中断时未完成的工具以 cancelled 标记回灌（tool_call_id 可为 ""），
+    # 关键是不再出现「assistant tool_calls 无任何 tool 结果」的损坏状态。
+    assert conv.last_role() == "tool"
+    tool_msg = conv.messages[-1]
+    assert len(tool_msg.tool_results) == 1
+    assert tool_msg.tool_results[0].is_error is True
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_stream_marks_cancelled_not_done():
+    """流式生成中取消：不当作正常完成（无 done 事件），对话尾部闭合。"""
+    registry = Registry()
+    registry.register(FakeEchoTool())
+
+    provider = FakeProvider()
+    provider.set_scripts(
+        [
+            [
+                StreamEvent(text="partial"),
+                StreamEvent(done=True),  # cancel 先触发，不会到达
+            ]
+        ]
+    )
+
+    agent = Agent(provider, registry, _test_engine(), "test")
+    conv = Conversation()
+    conv.add_user("cancel stream")
+    cancel = asyncio.Event()
+
+    done_seen = False
+    async for ev in agent.run(conv, Mode.BYPASS, cancel):
+        if ev.text:
+            cancel.set()
+        if ev.done:
+            done_seen = True
+
+    assert done_seen is False
+    # 尾部闭合为 assistant（取消尾巴），且没有挂起的孤立 tool_calls
+    assert conv.last_role() == "assistant"
+    for m in conv.messages:
+        assert not m.tool_calls
+
+
 # ── 场景 F：Plan Mode 工具集 (AC13) ──────────────
 
 

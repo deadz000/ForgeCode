@@ -21,6 +21,7 @@ from forgecode.compact import (
 from forgecode.compact.token import estimate_tokens
 from forgecode.compact.token import usage_anchor as _usage_anchor_fn
 from forgecode.conversation.history import (
+    ROLE_ASSISTANT,
     ROLE_USER,
     Conversation,
     ToolCall,
@@ -405,6 +406,11 @@ class Agent:
                     usage = retry_result.get("usage")
                     err = retry_result.get("err")
 
+            if stream_result.get("cancelled"):
+                # 流式生成中用户取消：按取消路径收尾，不当作正常完成
+                await _finish_cancelled(conv)
+                return
+
             if err is not None:
                 if cancel.is_set():
                     await _finish_cancelled(conv)
@@ -444,19 +450,28 @@ class Agent:
 
             # 工具执行
             batched_result: dict[str, Any] = {}
-            async for ev in _execute_batched(
-                self._registry,
-                self._engine,
-                calls,
-                mode,
-                cancel,
-                self.runtime,
-                batched_result,
-                self._hook_engine,
-                dont_ask=self.dont_ask,
-                approval_upgrader=self.approval_upgrader,
-            ):
-                yield ev
+            try:
+                async for ev in _execute_batched(
+                    self._registry,
+                    self._engine,
+                    calls,
+                    mode,
+                    cancel,
+                    self.runtime,
+                    batched_result,
+                    self._hook_engine,
+                    dont_ask=self.dont_ask,
+                    approval_upgrader=self.approval_upgrader,
+                ):
+                    yield ev
+            except (asyncio.CancelledError, KeyboardInterrupt):
+                # 中断安全（Ctrl+C 在工具执行中会以 KeyboardInterrupt/CancelledError
+                # 打断 _execute_batched）：assistant tool_calls 必须有对应 tool 结果，
+                # 否则后续请求因工具调用无回灌而报错，会话永久不可用。
+                interrupted_results = batched_result.get("results", [])
+                if conv.last_role() == ROLE_ASSISTANT:
+                    conv.add_tool_results(interrupted_results)
+                raise
 
             results: list[ToolResult] = batched_result.get("results", [])
             completed: bool = batched_result.get("completed", False)
@@ -635,6 +650,8 @@ async def _stream_once(
         async for se in provider.stream(req):
             if cancel.is_set():
                 result["text"] = text
+                result["calls"] = calls
+                result["cancelled"] = True
                 result["ok"] = False
                 return
             if se.err is not None:
@@ -692,70 +709,203 @@ async def _execute_batched(
     results: list[ToolResult | None] = [None] * len(calls)
     i = 0
 
-    while i < len(calls):
-        if cancel.is_set():
-            _fill_cancelled(results, i)
-            result["results"] = _pack_results(results)
-            result["completed"] = False
-            return
+    try:
+        while i < len(calls):
+            if cancel.is_set():
+                _fill_cancelled(results, i)
+                result["results"] = _pack_results(results)
+                result["completed"] = False
+                return
 
-        read_only = registry.is_read_only(calls[i].name)
+            read_only = registry.is_read_only(calls[i].name)
 
-        if read_only:
-            # 只读批
-            j = i
-            while j < len(calls) and registry.is_read_only(calls[j].name):
-                j += 1
+            if read_only:
+                # 只读批
+                j = i
+                while j < len(calls) and registry.is_read_only(calls[j].name):
+                    j += 1
 
-            denials: dict[int, tuple[Decision, str]] = {}
-            blocked_hooks: dict[int, tuple[str, str]] = {}
-            for k in range(i, j):
+                denials: dict[int, tuple[Decision, str]] = {}
+                blocked_hooks: dict[int, tuple[str, str]] = {}
+                for k in range(i, j):
+                    hres = await _dispatch_hook(
+                        hook_engine,
+                        runtime,
+                        HookEvent.PRE_TOOL_USE,
+                        _hook_payload_for(HookEvent.PRE_TOOL_USE, mode, runtime, calls[k]),
+                    )
+                    if hres.blocked:
+                        blocked_hooks[k] = (hres.blocking_hook_name, hres.reason)
+                        continue
+                    d, reason = engine.check(mode, calls[k], True)
+                    if d == Decision.DENY:
+                        denials[k] = (d, reason)
+
+                for k in range(i, j):
+                    yield Event(
+                        tool=ToolEvent(
+                            name=calls[k].name,
+                            args=_args_preview(calls[k].input),
+                            phase=Phase.START,
+                        )
+                    )
+
+                async def _run_read_only(k: int) -> None:
+                    if k in blocked_hooks:
+                        name, reason = blocked_hooks[k]
+                        results[k] = ToolResult(
+                            tool_call_id=calls[k].id,
+                            content=f"[hook {name}] {reason}",
+                            is_error=True,
+                        )
+                        return
+                    if k in denials:
+                        _, reason = denials[k]
+                        results[k] = ToolResult(tool_call_id=calls[k].id, content=reason, is_error=True)
+                        return
+                    exec_result = await registry.execute(
+                        calls[k].name, calls[k].input, timeout=DEFAULT_TIMEOUT
+                    )
+                    results[k] = ToolResult(
+                        tool_call_id=calls[k].id, content=exec_result.content, is_error=exec_result.is_error
+                    )
+                    # ReadFile 成功后写 recovery
+                    await _track_read_file(runtime, calls[k], exec_result)
+
+                await asyncio.gather(*[_run_read_only(k) for k in range(i, j)])
+
+                for k in range(i, j):
+                    r = results[k]
+                    assert r is not None
+                    await _dispatch_hook(
+                        hook_engine,
+                        runtime,
+                        HookEvent.POST_TOOL_USE,
+                        _hook_payload_for(
+                            HookEvent.POST_TOOL_USE,
+                            mode,
+                            runtime,
+                            calls[k],
+                            tool_result=_summary(r.content),
+                            is_error=r.is_error,
+                        ),
+                    )
+                    yield Event(
+                        tool=ToolEvent(
+                            name=calls[k].name,
+                            phase=Phase.END,
+                            result=_summary(r.content),
+                            is_error=r.is_error,
+                        )
+                    )
+
+                i = j
+            else:
+                # 有副作用 → 串行
+                call = calls[i]
                 hres = await _dispatch_hook(
                     hook_engine,
                     runtime,
                     HookEvent.PRE_TOOL_USE,
-                    _hook_payload_for(HookEvent.PRE_TOOL_USE, mode, runtime, calls[k]),
+                    _hook_payload_for(HookEvent.PRE_TOOL_USE, mode, runtime, call),
                 )
+                yield Event(tool=ToolEvent(name=call.name, args=_args_preview(call.input), phase=Phase.START))
+
                 if hres.blocked:
-                    blocked_hooks[k] = (hres.blocking_hook_name, hres.reason)
-                    continue
-                d, reason = engine.check(mode, calls[k], True)
-                if d == Decision.DENY:
-                    denials[k] = (d, reason)
-
-            for k in range(i, j):
-                yield Event(
-                    tool=ToolEvent(
-                        name=calls[k].name,
-                        args=_args_preview(calls[k].input),
-                        phase=Phase.START,
-                    )
-                )
-
-            async def _run_read_only(k: int) -> None:
-                if k in blocked_hooks:
-                    name, reason = blocked_hooks[k]
-                    results[k] = ToolResult(
-                        tool_call_id=calls[k].id,
-                        content=f"[hook {name}] {reason}",
+                    results[i] = ToolResult(
+                        tool_call_id=call.id,
+                        content=f"[hook {hres.blocking_hook_name}] {hres.reason}",
                         is_error=True,
                     )
-                    return
-                if k in denials:
-                    _, reason = denials[k]
-                    results[k] = ToolResult(tool_call_id=calls[k].id, content=reason, is_error=True)
-                    return
-                exec_result = await registry.execute(calls[k].name, calls[k].input, timeout=DEFAULT_TIMEOUT)
-                results[k] = ToolResult(
-                    tool_call_id=calls[k].id, content=exec_result.content, is_error=exec_result.is_error
-                )
-                # ReadFile 成功后写 recovery
-                await _track_read_file(runtime, calls[k], exec_result)
+                else:
+                    d, reason = engine.check(mode, call, False)
+                    if d == Decision.ALLOW:
+                        exec_result = await registry.execute(call.name, call.input, timeout=DEFAULT_TIMEOUT)
+                        results[i] = ToolResult(
+                            tool_call_id=call.id, content=exec_result.content, is_error=exec_result.is_error
+                        )
+                        await _track_read_file(runtime, call, exec_result)
+                    elif d == Decision.DENY:
+                        results[i] = ToolResult(tool_call_id=call.id, content=reason, is_error=True)
+                    elif dont_ask:
+                        # 子 Agent dontAsk 兜底：Ask 决策直接放行（黑名单/沙箱 DENY 已在上层拦截）
+                        exec_result = await registry.execute(call.name, call.input, timeout=DEFAULT_TIMEOUT)
+                        results[i] = ToolResult(
+                            tool_call_id=call.id, content=exec_result.content, is_error=exec_result.is_error
+                        )
+                        await _track_read_file(runtime, call, exec_result)
+                    elif approval_upgrader is not None:
+                        # 子 Agent 升级到父 TUI / 直接弹窗审批（spec F12 第三层）
+                        req = ApprovalRequest(
+                            name=call.name,
+                            args=_args_preview(call.input),
+                            reason=reason,
+                            respond=asyncio.get_running_loop().create_future(),
+                        )
+                        outcome, ok = await approval_upgrader(req)
+                        if not ok or outcome == Outcome.DENY_ONCE:
+                            results[i] = ToolResult(tool_call_id=call.id, content=reason, is_error=True)
+                        else:
+                            if outcome == Outcome.ALLOW_FOREVER:
+                                try:
+                                    from forgecode.permission.persist import persist_local_allow
 
-            await asyncio.gather(*[_run_read_only(k) for k in range(i, j)])
+                                    persist_local_allow(engine, call)
+                                except Exception:
+                                    pass
+                            exec_result = await registry.execute(
+                                call.name, call.input, timeout=DEFAULT_TIMEOUT
+                            )
+                            results[i] = ToolResult(
+                                tool_call_id=call.id,
+                                content=exec_result.content,
+                                is_error=exec_result.is_error,
+                            )
+                            await _track_read_file(runtime, call, exec_result)
+                    else:  # ASK
+                        await _dispatch_hook(
+                            hook_engine,
+                            runtime,
+                            HookEvent.NOTIFICATION,
+                            _base_payload(
+                                HookEvent.NOTIFICATION,
+                                mode,
+                                runtime,
+                                kind="approval",
+                                detail=call.name,
+                            ),
+                        )
+                        respond: asyncio.Future[Outcome] = asyncio.get_running_loop().create_future()
+                        yield Event(
+                            approval=ApprovalRequest(
+                                name=call.name,
+                                args=_args_preview(call.input),
+                                reason=reason,
+                                respond=respond,
+                            )
+                        )
+                        outcome = await respond
+                        if outcome == Outcome.DENY_ONCE:
+                            results[i] = ToolResult(tool_call_id=call.id, content=reason, is_error=True)
+                        else:
+                            if outcome == Outcome.ALLOW_FOREVER:
+                                try:
+                                    from forgecode.permission.persist import persist_local_allow
 
-            for k in range(i, j):
-                r = results[k]
+                                    persist_local_allow(engine, call)
+                                except Exception:
+                                    pass
+                            exec_result = await registry.execute(
+                                call.name, call.input, timeout=DEFAULT_TIMEOUT
+                            )
+                            results[i] = ToolResult(
+                                tool_call_id=call.id,
+                                content=exec_result.content,
+                                is_error=exec_result.is_error,
+                            )
+                            await _track_read_file(runtime, call, exec_result)
+
+                r = results[i]
                 assert r is not None
                 await _dispatch_hook(
                     hook_engine,
@@ -765,139 +915,23 @@ async def _execute_batched(
                         HookEvent.POST_TOOL_USE,
                         mode,
                         runtime,
-                        calls[k],
+                        call,
                         tool_result=_summary(r.content),
                         is_error=r.is_error,
                     ),
                 )
                 yield Event(
                     tool=ToolEvent(
-                        name=calls[k].name, phase=Phase.END, result=_summary(r.content), is_error=r.is_error
+                        name=call.name, phase=Phase.END, result=_summary(r.content), is_error=r.is_error
                     )
                 )
+                i += 1
 
-            i = j
-        else:
-            # 有副作用 → 串行
-            call = calls[i]
-            hres = await _dispatch_hook(
-                hook_engine,
-                runtime,
-                HookEvent.PRE_TOOL_USE,
-                _hook_payload_for(HookEvent.PRE_TOOL_USE, mode, runtime, call),
-            )
-            yield Event(tool=ToolEvent(name=call.name, args=_args_preview(call.input), phase=Phase.START))
-
-            if hres.blocked:
-                results[i] = ToolResult(
-                    tool_call_id=call.id,
-                    content=f"[hook {hres.blocking_hook_name}] {hres.reason}",
-                    is_error=True,
-                )
-            else:
-                d, reason = engine.check(mode, call, False)
-                if d == Decision.ALLOW:
-                    exec_result = await registry.execute(call.name, call.input, timeout=DEFAULT_TIMEOUT)
-                    results[i] = ToolResult(
-                        tool_call_id=call.id, content=exec_result.content, is_error=exec_result.is_error
-                    )
-                    await _track_read_file(runtime, call, exec_result)
-                elif d == Decision.DENY:
-                    results[i] = ToolResult(tool_call_id=call.id, content=reason, is_error=True)
-                elif dont_ask:
-                    # 子 Agent dontAsk 兜底：Ask 决策直接放行（黑名单/沙箱 DENY 已在上层拦截）
-                    exec_result = await registry.execute(call.name, call.input, timeout=DEFAULT_TIMEOUT)
-                    results[i] = ToolResult(
-                        tool_call_id=call.id, content=exec_result.content, is_error=exec_result.is_error
-                    )
-                    await _track_read_file(runtime, call, exec_result)
-                elif approval_upgrader is not None:
-                    # 子 Agent 升级到父 TUI / 直接弹窗审批（spec F12 第三层）
-                    req = ApprovalRequest(
-                        name=call.name,
-                        args=_args_preview(call.input),
-                        reason=reason,
-                        respond=asyncio.get_running_loop().create_future(),
-                    )
-                    outcome, ok = await approval_upgrader(req)
-                    if not ok or outcome == Outcome.DENY_ONCE:
-                        results[i] = ToolResult(tool_call_id=call.id, content=reason, is_error=True)
-                    else:
-                        if outcome == Outcome.ALLOW_FOREVER:
-                            try:
-                                from forgecode.permission.persist import persist_local_allow
-
-                                persist_local_allow(engine, call)
-                            except Exception:
-                                pass
-                        exec_result = await registry.execute(call.name, call.input, timeout=DEFAULT_TIMEOUT)
-                        results[i] = ToolResult(
-                            tool_call_id=call.id, content=exec_result.content, is_error=exec_result.is_error
-                        )
-                        await _track_read_file(runtime, call, exec_result)
-                else:  # ASK
-                    await _dispatch_hook(
-                        hook_engine,
-                        runtime,
-                        HookEvent.NOTIFICATION,
-                        _base_payload(
-                            HookEvent.NOTIFICATION,
-                            mode,
-                            runtime,
-                            kind="approval",
-                            detail=call.name,
-                        ),
-                    )
-                    respond: asyncio.Future[Outcome] = asyncio.get_running_loop().create_future()
-                    yield Event(
-                        approval=ApprovalRequest(
-                            name=call.name,
-                            args=_args_preview(call.input),
-                            reason=reason,
-                            respond=respond,
-                        )
-                    )
-                    outcome = await respond
-                    if outcome == Outcome.DENY_ONCE:
-                        results[i] = ToolResult(tool_call_id=call.id, content=reason, is_error=True)
-                    else:
-                        if outcome == Outcome.ALLOW_FOREVER:
-                            try:
-                                from forgecode.permission.persist import persist_local_allow
-
-                                persist_local_allow(engine, call)
-                            except Exception:
-                                pass
-                        exec_result = await registry.execute(call.name, call.input, timeout=DEFAULT_TIMEOUT)
-                        results[i] = ToolResult(
-                            tool_call_id=call.id, content=exec_result.content, is_error=exec_result.is_error
-                        )
-                        await _track_read_file(runtime, call, exec_result)
-
-            r = results[i]
-            assert r is not None
-            await _dispatch_hook(
-                hook_engine,
-                runtime,
-                HookEvent.POST_TOOL_USE,
-                _hook_payload_for(
-                    HookEvent.POST_TOOL_USE,
-                    mode,
-                    runtime,
-                    call,
-                    tool_result=_summary(r.content),
-                    is_error=r.is_error,
-                ),
-            )
-            yield Event(
-                tool=ToolEvent(
-                    name=call.name, phase=Phase.END, result=_summary(r.content), is_error=r.is_error
-                )
-            )
-            i += 1
-
-    result["results"] = _pack_results(results)
-    result["completed"] = True
+    finally:
+        # 取消/中断安全：无论正常结束还是被 KeyboardInterrupt/CancelledError
+        # 中断，都把已收集结果回写（未执行工具标记取消），保证上层能闭合对话结构。
+        result["results"] = _pack_results(results)
+        result["completed"] = not cancel.is_set()
 
 
 # ── Hook 辅助 ─────────────────────────────────────
