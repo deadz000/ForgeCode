@@ -651,13 +651,13 @@ class ForgeApp:
         非全屏，渲染在当前光标处（输出末尾），随输入文本换行而扩大。
         """
         top = Window(
-            FormattedTextControl("─" * self._width),
+            FormattedTextControl(self._border_text),
             height=1,
             style="class:input-border",
             always_hide_cursor=True,
         )
         bottom = Window(
-            FormattedTextControl("─" * self._width),
+            FormattedTextControl(self._border_text),
             height=1,
             style="class:input-border",
             always_hide_cursor=True,
@@ -751,7 +751,17 @@ class ForgeApp:
             min_redraw_interval=0.05,
             key_bindings=kb,
             input=self._make_input(),
+            on_resize=self._on_resize,
         )
+
+    def _border_text(self) -> str:
+        """输入盒边框：按当前终端宽度生成（resize 后 invalidate 即重绘）。"""
+        return "─" * max(self._width, 1)
+
+    def _on_resize(self, app: Application) -> None:
+        """终端尺寸变化：刷新宽度并重绘输入盒（边框/状态栏随之适配）。"""
+        self._width = shutil.get_terminal_size().columns
+        app.invalidate()
 
     async def run_async(self) -> None:
         """非全屏主循环：输出终端原生滚动，输入框盒子 + 状态栏尾随输出末尾。"""

@@ -1,8 +1,9 @@
-"""ForgeApp TUI 状态展示单测：状态栏/提示文案（A2 计时反馈改造）+ 流式渲染（A3）。"""
+"""ForgeApp TUI 状态展示单测：状态栏/提示文案（A2）+ 流式渲染（A3）+ resize（A4）。"""
 
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
 from forgecode.agent.runtime import new_runtime
 from forgecode.config.schema import AppConfig, ProviderConfig
@@ -115,3 +116,31 @@ def test_md_render_due_big_increment_immediate(monkeypatch) -> None:
     monkeypatch.setattr("forgecode.tui.app.time.monotonic", _now)
     assert app._md_render_due(10) is True
     assert app._md_render_due(10 + _MD_RENDER_CHUNK + 1) is True
+
+
+# ── A4 终端 resize 适配 ────────────────────────
+
+
+def test_border_text_uses_current_width() -> None:
+    app = _make_app()
+    app._width = 80
+    assert app._border_text() == "─" * 80
+    app._width = 120
+    assert app._border_text() == "─" * 120
+    app._width = 0
+    assert app._border_text() == "─" * 1  # 宽度至少 1
+
+
+def test_on_resize_updates_width_and_invalidates(monkeypatch) -> None:
+    app = _make_app()
+    app._width = 80
+    monkeypatch.setattr(
+        "forgecode.tui.app.shutil.get_terminal_size",
+        lambda: SimpleNamespace(columns=100),
+    )
+    fake_app = SimpleNamespace(invalidated=0)
+    fake_app.invalidate = lambda: setattr(fake_app, "invalidated", fake_app.invalidated + 1)  # type: ignore[union-attr]
+
+    app._on_resize(fake_app)  # type: ignore[arg-type]
+    assert app._width == 100
+    assert fake_app.invalidated == 1
