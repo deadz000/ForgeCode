@@ -2,26 +2,43 @@
 
 from __future__ import annotations
 
-from forgecode.command.command import Handler
+from forgecode.command.command import Command, Handler, Kind
 from forgecode.command.registry import Registry
 from forgecode.command.ui import ToolLogEntry
 
 # /tool 列表模式下结果首行预览长度
 _TOOL_PREVIEW_LEN = 120
 
+# /help 分组：Kind → 中文组名（is_skill 命令归"技能"组）
+_HELP_GROUP_NAMES = {
+    Kind.PROMPT: "对话",
+    Kind.UI: "界面",
+    Kind.LOCAL: "信息",
+}
+_HELP_GROUP_ORDER = ("对话", "界面", "信息", "技能", "其他")
+
 
 def make_help_handler(reg: Registry) -> Handler:
-    """工厂函数：闭包捕获 reg，生成 /help 的 handler。"""
+    """工厂函数：闭包捕获 reg，生成按分类分组的 /help 输出。"""
 
     async def _handler(ui) -> None:
         cmds = reg.visible()
         if not cmds:
             ui.println("无可用命令。")
             return
-        max_name = max(len(c.name) for c in cmds)
-        lines: list[str] = []
+        groups: dict[str, list[Command]] = {}
         for c in cmds:
-            lines.append(f"/{c.name.ljust(max_name)}  {c.description}")
+            gname = "技能" if c.is_skill else _HELP_GROUP_NAMES.get(c.kind, "其他")
+            groups.setdefault(gname, []).append(c)
+        max_name = max(len(c.name) for c in cmds)
+        lines = ["可用命令（输入 /命令 或 Tab 补全）:"]
+        for gname in _HELP_GROUP_ORDER:
+            if gname not in groups:
+                continue
+            lines.append("")
+            lines.append(f"── {gname} ──")
+            for c in groups[gname]:
+                lines.append(f"  /{c.name.ljust(max_name)}  {c.description}")
         ui.println("\n".join(lines))
 
     return _handler

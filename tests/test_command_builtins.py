@@ -168,6 +168,24 @@ async def test_help_handler_output():
         assert f"/{name}" in output, f"Missing /{name} in help output"
 
 
+@pytest.mark.asyncio
+async def test_help_handler_grouped():
+    """/help 输出按 Kind 分类分组（A7）。"""
+    reg = Registry()
+    register_builtins(reg)
+    ui = RecordingUI()
+    await reg.lookup("help").handler(ui)  # type: ignore[union-attr]
+    output = ui.printed[0] if ui.printed else ""
+    assert "── 对话 ──" in output  # Kind.PROMPT：/do
+    assert "── 界面 ──" in output  # Kind.UI：/clear /plan 等
+    assert "── 信息 ──" in output  # Kind.LOCAL：/status /help 等
+    # /do 归对话组、/status 归信息组
+    do_line = next((line for line in output.split("\n") if "/do" in line), "")
+    status_line = next((line for line in output.split("\n") if "/status" in line), "")
+    assert output.index(do_line) < output.index("── 界面 ──")
+    assert output.index(status_line) > output.index("── 界面 ──")
+
+
 # ── /worktree handler ──
 
 
