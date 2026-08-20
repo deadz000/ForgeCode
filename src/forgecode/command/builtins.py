@@ -7,6 +7,7 @@ from forgecode.command.builtin_local import (
     handle_permission,
     handle_session,
     handle_status,
+    handle_tool,
     make_help_handler,
 )
 from forgecode.command.builtin_prompt import handle_do
@@ -120,6 +121,13 @@ def register_builtins(reg: Registry) -> None:
             description="管理 Team（list/info/delete/kill）",
             kind=Kind.LOCAL,
             handler=handle_team,
+            accepts_args=True,
+        ),
+        Command(
+            name="tool",
+            description="查看工具调用日志（/tool <序号> 展开详情）",
+            kind=Kind.LOCAL,
+            handler=handle_tool,
             accepts_args=True,
         ),
         Command(

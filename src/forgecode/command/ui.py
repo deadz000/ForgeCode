@@ -29,6 +29,18 @@ class WorktreeSummary:
     manual: bool
 
 
+@dataclass(frozen=True)
+class ToolLogEntry:
+    """一次工具调用的记录（供 /tool 命令折叠展开查看）。"""
+
+    index: int
+    name: str
+    args: str
+    result: str
+    is_error: bool
+    elapsed: float
+
+
 class WorktreeAccessor(Protocol):
     """/worktree 命令访问 Worktree 管理器的轻量协议（屏蔽反向依赖）。"""
 
@@ -76,6 +88,11 @@ class UI(Protocol):
 
     # ── Team 访问 ──
     def team_manager(self): ...
+
+    # ── 工具调用日志（/tool 命令）──
+    def tool_log(self, limit: int = 10) -> list[ToolLogEntry]: ...
+    def tool_log_detail(self, index: int) -> ToolLogEntry | None: ...
+    def tool_log_clear(self) -> None: ...
 
     # ── Hook 查询 ──
     def hook_sources(self) -> list[str]: ...
@@ -162,6 +179,15 @@ class NopUI:
 
     def team_manager(self):
         return None
+
+    def tool_log(self, limit: int = 10) -> list[ToolLogEntry]:
+        return []
+
+    def tool_log_detail(self, index: int) -> ToolLogEntry | None:
+        return None
+
+    def tool_log_clear(self) -> None:
+        pass
 
     def quit(self) -> None:
         pass

@@ -13,6 +13,7 @@ from forgecode.tool import Registry
 from forgecode.tui.app import (
     _MD_RENDER_CHUNK,
     _MD_RENDER_INTERVAL,
+    _TOOL_LOG_LIMIT,
     ForgeApp,
     _prepare_markdown_render,
 )
@@ -144,3 +145,59 @@ def test_on_resize_updates_width_and_invalidates(monkeypatch) -> None:
     app._on_resize(fake_app)  # type: ignore[arg-type]
     assert app._width == 100
     assert fake_app.invalidated == 1
+
+
+# ── A5 工具调用日志（折叠 + /tool 展开）───────
+
+
+def _quiet_console(app: ForgeApp) -> ForgeApp:
+    """测试环境无控制台：Rich 回退 GBK 编码会因特殊字符崩溃，注入 StringIO。"""
+    import io
+
+    from rich.console import Console
+
+    app.console = Console(file=io.StringIO(), force_terminal=False, width=100)
+    return app
+
+
+def test_tool_log_records_and_lists(monkeypatch) -> None:
+    from forgecode.agent import Phase, ToolEvent
+
+    app = _quiet_console(_make_app())
+    clock = [1000.0]
+    monkeypatch.setattr("forgecode.tui.app.time.monotonic", lambda: clock[0])
+
+    app._render_tool_start(ToolEvent(name="read_file", args="{}", phase=Phase.START))
+    clock[0] += 1.5
+    app._render_tool_end(
+        ToolEvent(name="read_file", phase=Phase.END, result="line1\nline2\nline3", is_error=False)
+    )
+
+    entries = app.tool_log()
+    assert len(entries) == 1
+    e = entries[0]
+    assert e.index == 1
+    assert e.name == "read_file"
+    assert e.result == "line1\nline2\nline3"
+    assert e.is_error is False
+    assert e.elapsed == 1.5  # start 到 end 的墙钟差
+
+    detail = app.tool_log_detail(1)
+    assert detail is not None and detail.args == "{}"
+    assert app.tool_log_detail(99) is None
+
+    app.tool_log_clear()
+    assert app.tool_log() == []
+
+
+def test_tool_log_keeps_limit() -> None:
+    from forgecode.agent import Phase, ToolEvent
+
+    app = _quiet_console(_make_app())
+    for i in range(_TOOL_LOG_LIMIT + 5):
+        app._render_tool_start(ToolEvent(name="t", args="{}", phase=Phase.START))
+        app._render_tool_end(ToolEvent(name="t", phase=Phase.END, result=f"r{i}"))
+    assert len(app._tool_log) == _TOOL_LOG_LIMIT
+    # 丢弃最旧：最早的 index 已被挤出，最新 index 单调递增
+    assert app.tool_log_detail(1) is None
+    assert app.tool_log_detail(_TOOL_LOG_LIMIT + 5) is not None

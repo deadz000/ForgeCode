@@ -29,7 +29,7 @@ from forgecode.command import Registry as CmdRegistry
 from forgecode.command import parse as parse_command
 from forgecode.command import register_builtins
 from forgecode.command.command import Command as CmdCommand
-from forgecode.command.ui import SkillSummary
+from forgecode.command.ui import SkillSummary, ToolLogEntry
 from forgecode.config.schema import AppConfig
 from forgecode.conversation.history import Conversation
 from forgecode.hook import DispatchResult
@@ -119,6 +119,11 @@ class ForgeApp:
         # 流式 Markdown 渲染节流状态
         self._last_md_len: int = 0
         self._last_md_at: float = 0.0
+        # 工具调用日志（/tool 命令折叠展开）
+        self._tool_log: list[ToolLogEntry] = []
+        self._tool_seq: int = 0
+        self._tool_start_ts: dict[str, float] = {}
+        self._tool_pending_args: dict[str, str] = {}
         self._show_thinking: bool = False
         self._exit_flag: bool = False
         # Agent Loop 状态
@@ -400,6 +405,23 @@ class ForgeApp:
 
     def tool_count(self) -> int:
         return self.registry.count()
+
+    # ── 工具调用日志（/tool 命令折叠展开）──
+
+    def tool_log(self, limit: int = 10) -> list[ToolLogEntry]:
+        """返回最近 limit 条工具调用记录（倒序，新在前）。"""
+        return list(reversed(self._tool_log[-limit:]))
+
+    def tool_log_detail(self, index: int) -> ToolLogEntry | None:
+        """按序号取一条工具调用记录。"""
+        for e in self._tool_log:
+            if e.index == index:
+                return e
+        return None
+
+    def tool_log_clear(self) -> None:
+        """清空工具调用日志。"""
+        self._tool_log.clear()
 
     def memory_files(self) -> list[str]:
         if self._mem_mgr is None:
@@ -1165,21 +1187,36 @@ class ForgeApp:
             req.respond.set_result(Outcome.DENY_ONCE)
             self.console.print("[dim]拒绝本次[/dim]")
 
-    # ── 工具行渲染 ────────────────────────────────
+    # ── 工具行渲染（默认折叠，/tool 展开）──────────
 
     def _render_tool_start(self, tool: ToolEvent) -> None:
         """渲染工具调用开始行：● name(args)。"""
+        self._tool_start_ts[tool.name] = time.monotonic()
+        self._tool_pending_args[tool.name] = tool.args
         self.console.print()
         self.console.print(f"[bold cyan]●[/bold cyan] [bold]{tool.name}[/bold]({tool.args})")
 
     def _render_tool_end(self, tool: ToolEvent) -> None:
-        """渲染工具结果摘要：缩进的 ⎿ 结果。"""
+        """渲染工具结果折叠行：首行摘要 + 耗时 + 展开提示（/tool <序号>）。"""
+        start_ts = self._tool_start_ts.get(tool.name)
+        elapsed = time.monotonic() - start_ts if start_ts is not None else 0.0
+        self._tool_seq += 1
+        entry = ToolLogEntry(
+            index=self._tool_seq,
+            name=tool.name,
+            args=self._tool_pending_args.get(tool.name, ""),
+            result=tool.result,
+            is_error=tool.is_error,
+            elapsed=elapsed,
+        )
+        self._tool_log.append(entry)
+        if len(self._tool_log) > _TOOL_LOG_LIMIT:
+            del self._tool_log[: len(self._tool_log) - _TOOL_LOG_LIMIT]
+
         style = "red" if tool.is_error else "dim"
-        lines = tool.result.split("\n")[:8]
-        for line in lines:
-            self.console.print(f"  [dim]⎿[/dim] [{style}]{line}[/{style}]")
-        if len(tool.result.split("\n")) > 8:
-            self.console.print("  [dim]⎿ ...[/dim]")
+        first = (tool.result.split("\n")[0] if tool.result else "")[:_TOOL_LINE_PREVIEW]
+        tail = f"· {elapsed:.1f}s · /tool {entry.index} 展开"
+        self.console.print(f"  [dim]⎿[/dim] [{style}]{first}[/{style}]  [dim]{tail}[/dim]")
 
     # ── 流式输出 ──────────────────────────────────
 
@@ -1316,6 +1353,11 @@ def _fmt_tok(n: int) -> str:
 
 _MD_RENDER_CHUNK: int = 512  # 增量超过该字符数才重渲染 Markdown
 _MD_RENDER_INTERVAL: float = 0.3  # 距上次渲染超过该秒数才重渲染
+
+# ── 工具调用日志（/tool）──
+
+_TOOL_LOG_LIMIT: int = 200  # 日志条数上限（超出丢弃最旧）
+_TOOL_LINE_PREVIEW: int = 120  # 折叠行结果首行预览长度
 
 
 def _prepare_markdown_render(text: str) -> str:
