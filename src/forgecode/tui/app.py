@@ -1165,46 +1165,35 @@ class ForgeApp:
     # ── 人在回路 ──────────────────────────────────
 
     async def _handle_approval(self, req: ApprovalRequest, timer_task: asyncio.Task) -> None:
-        """展示待批准块，等待用户三选一。"""
+        """展示待批准选择题，等待用户方向键选择（单选）。"""
         timer_task.cancel()
         self.console.print("\n")
-        self.console.print(
-            Panel(
-                Text(
-                    f"● {req.name}({req.args})\n"
-                    f"  原因：{req.reason}\n\n"
-                    f"  1. 允许本次\n"
-                    f"  2. 永久允许（写入本地配置）\n"
-                    f"  3. 拒绝本次\n",
-                ),
-                title="权限确认",
-                border_style="yellow",
-            )
+        from forgecode.tui.choices import ChoiceOption, ask_choice
+
+        result = await ask_choice(
+            title=f"● {req.name}({req.args})",
+            subtitle=f"原因：{req.reason}",
+            options=[
+                ChoiceOption("allow_once", "允许本次"),
+                ChoiceOption("allow_forever", "永久允许（写入本地配置）"),
+                ChoiceOption("deny_once", "拒绝本次"),
+            ],
         )
 
-        # 等待用户选择
-        while True:
-            try:
-                choice = await asyncio.get_running_loop().run_in_executor(
-                    None, lambda: input("  选择 [1/2/3]（默认 1）：").strip()
-                )
-            except (EOFError, KeyboardInterrupt):
-                req.respond.set_result(Outcome.DENY_ONCE)
-                self.console.print("[dim]已取消[/dim]")
-                return
-
-            if choice == "1" or choice == "":
-                req.respond.set_result(Outcome.ALLOW_ONCE)
-                self.console.print("[dim]允许本次[/dim]")
-                return
-            elif choice == "2":
-                req.respond.set_result(Outcome.ALLOW_FOREVER)
-                self.console.print("[dim]永久允许（已写入本地配置）[/dim]")
-                return
-            elif choice == "3":
-                req.respond.set_result(Outcome.DENY_ONCE)
-                self.console.print("[dim]拒绝本次[/dim]")
-                return
+        if result.cancelled:
+            req.respond.set_result(Outcome.DENY_ONCE)
+            self.console.print("[dim]已取消[/dim]")
+            return
+        value = result.values[0]
+        if value == "allow_once":
+            req.respond.set_result(Outcome.ALLOW_ONCE)
+            self.console.print("[dim]允许本次[/dim]")
+        elif value == "allow_forever":
+            req.respond.set_result(Outcome.ALLOW_FOREVER)
+            self.console.print("[dim]永久允许（已写入本地配置）[/dim]")
+        else:
+            req.respond.set_result(Outcome.DENY_ONCE)
+            self.console.print("[dim]拒绝本次[/dim]")
 
     # ── 工具行渲染 ────────────────────────────────
 
