@@ -678,10 +678,11 @@ class ForgeApp:
         get_app().exit(result=buf.text)
         return True
 
-    def _build_input_app(self) -> Application[str]:
+    def _build_input_app(self, input: Any = None, output: Any = None) -> Application[str]:
         """输入盒子：上边框 + 输入行 + 下边框 + 状态栏（尾随盒子底部）。
 
         非全屏，渲染在当前光标处（输出末尾），随输入文本换行而扩大。
+        input/output 供测试注入 pipe/Dummy，默认用系统输入。
         """
         top = Window(
             FormattedTextControl(self._border_text),
@@ -770,8 +771,8 @@ class ForgeApp:
             mouse_support=False,
             min_redraw_interval=0.05,
             key_bindings=kb,
-            input=self._make_input(),
-            on_resize=self._on_resize,
+            input=input if input is not None else self._make_input(),
+            output=output,
         )
 
     def _ctrl_c_handler(self, event: KeyPressEvent) -> None:
@@ -790,13 +791,12 @@ class ForgeApp:
         self.console.print(f"[dim]{EXIT_HINT}[/dim]")
 
     def _border_text(self) -> str:
-        """输入盒边框：按当前终端宽度生成（resize 后 invalidate 即重绘）。"""
+        """输入盒边框：每次渲染惰性取当前终端宽度（resize 自适应，无需回调）。"""
+        try:
+            self._width = shutil.get_terminal_size().columns
+        except Exception:
+            pass  # 无法获取尺寸时沿用上次宽度
         return "─" * max(self._width, 1)
-
-    def _on_resize(self, app: Application) -> None:
-        """终端尺寸变化：刷新宽度并重绘输入盒（边框/状态栏随之适配）。"""
-        self._width = shutil.get_terminal_size().columns
-        app.invalidate()
 
     async def run_async(self) -> None:
         """非全屏主循环：输出终端原生滚动，输入框盒子 + 状态栏尾随输出末尾。"""

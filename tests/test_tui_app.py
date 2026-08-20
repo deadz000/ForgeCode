@@ -123,29 +123,42 @@ def test_md_render_due_big_increment_immediate(monkeypatch) -> None:
 # ── A4 终端 resize 适配 ────────────────────────
 
 
-def test_border_text_uses_current_width() -> None:
+def test_border_text_uses_current_width(monkeypatch) -> None:
     app = _make_app()
-    app._width = 80
-    assert app._border_text() == "─" * 80
-    app._width = 120
-    assert app._border_text() == "─" * 120
-    app._width = 0
-    assert app._border_text() == "─" * 1  # 宽度至少 1
-
-
-def test_on_resize_updates_width_and_invalidates(monkeypatch) -> None:
-    app = _make_app()
-    app._width = 80
     monkeypatch.setattr(
         "forgecode.tui.app.shutil.get_terminal_size",
-        lambda: SimpleNamespace(columns=100),
+        lambda: SimpleNamespace(columns=80),
     )
-    fake_app = SimpleNamespace(invalidated=0)
-    fake_app.invalidate = lambda: setattr(fake_app, "invalidated", fake_app.invalidated + 1)  # type: ignore[union-attr]
+    assert app._border_text() == "─" * 80
+    monkeypatch.setattr(
+        "forgecode.tui.app.shutil.get_terminal_size",
+        lambda: SimpleNamespace(columns=120),
+    )
+    # 每次渲染惰性取宽：resize 后边框自动适配
+    assert app._border_text() == "─" * 120
 
-    app._on_resize(fake_app)  # type: ignore[arg-type]
-    assert app._width == 100
-    assert fake_app.invalidated == 1
+
+def test_border_text_keeps_last_width_on_error(monkeypatch) -> None:
+    app = _make_app()
+    monkeypatch.setattr(
+        "forgecode.tui.app.shutil.get_terminal_size",
+        lambda: SimpleNamespace(columns=80),
+    )
+    assert app._border_text() == "─" * 80
+    monkeypatch.setattr(
+        "forgecode.tui.app.shutil.get_terminal_size",
+        lambda: (_ for _ in ()).throw(OSError("no tty")),
+    )
+    assert app._border_text() == "─" * 80  # 取宽失败沿用上次
+
+
+def test_build_input_app_constructs():
+    """输入盒 Application 可正常构造（防构造即崩溃回归，如 on_resize 参数错误）。"""
+    from prompt_toolkit.output.base import DummyOutput
+
+    app = _make_app()
+    input_app = app._build_input_app(output=DummyOutput())
+    assert input_app is not None
 
 
 # ── A8 状态栏信息完善 ─────────────────────────
