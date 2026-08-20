@@ -153,3 +153,46 @@ async def test_ask_choice_entry():
         inp.send_text("\x1b[B\r")  # ↓ → 第 1 项
         result = await ask_choice("t", OPTIONS, input=inp, output=out)
     assert result.values == ["forever"]
+
+
+# ── 分页（A9：←/→ 翻页）─────────────────────
+
+
+def test_paged_render_shows_page_and_hint():
+    opts = [ChoiceOption(str(i), f"item-{i}") for i in range(25)]
+    q = ChoiceQuestion("t", opts, page_size=10)
+    texts = [t for _, t in q._render()]
+    # 第一页只显示 10 项 + 页码行 + 提示行
+    item_lines = [t for t in texts if t.split(".")[0].isdigit()]
+    assert len(item_lines) == 10
+    assert any("第 1/3 页" in t for t in texts)
+    assert any("←/→ 翻页" in t for t in texts)
+
+
+def test_paged_single_page_no_pager_hint():
+    opts = [ChoiceOption(str(i), f"item-{i}") for i in range(5)]
+    q = ChoiceQuestion("t", opts, page_size=10)
+    texts = [t for _, t in q._render()]
+    assert not any("翻页" in t for t in texts)
+
+
+@pytest.mark.asyncio
+async def test_paged_right_left_navigation():
+    opts = [ChoiceOption(str(i), f"item-{i}") for i in range(25)]
+    with _pipe() as (inp, out):
+        # → 翻到第 2 页（选中第 11 项）→ 再翻到第 3 页 → ← 回第 2 页 → Enter 确认
+        inp.send_text("\x1b[C\x1b[C\x1b[D\r")
+        q = ChoiceQuestion("t", opts, page_size=10)
+        result = await q.run(input=inp, output=out)
+    assert result.values == ["10"]  # 第 2 页首项（0 基索引 10）
+
+
+@pytest.mark.asyncio
+async def test_paged_down_enter_on_page_two():
+    opts = [ChoiceOption(str(i), f"item-{i}") for i in range(25)]
+    with _pipe() as (inp, out):
+        # → 翻页后 ↓ 两次 → Enter：选中第 2 页第 3 项（索引 12）
+        inp.send_text("\x1b[C\x1b[B\x1b[B\r")
+        q = ChoiceQuestion("t", opts, page_size=10)
+        result = await q.run(input=inp, output=out)
+    assert result.values == ["12"]

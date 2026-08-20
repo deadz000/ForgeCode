@@ -14,7 +14,6 @@ from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 from prompt_toolkit.layout import Dimension, Float, FloatContainer, HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.menus import CompletionsMenu
-from prompt_toolkit.shortcuts import prompt as pt_prompt
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import TextArea
 from rich.console import Console
@@ -954,7 +953,7 @@ class ForgeApp:
             self.console.print(f"[red]压缩失败: {e}[/red]")
 
     async def _handle_resume(self) -> None:
-        """处理 /resume 命令：显示会话列表 + 选择恢复。
+        """处理 /resume 命令：方向键选择会话恢复（↑/↓ 选择，←/→ 翻页）。
 
         注意：idle 守卫已在 dispatch_slash 按 Kind 统一处理。
         """
@@ -963,7 +962,8 @@ class ForgeApp:
             return
 
         from forgecode.session import list_sessions
-        from forgecode.tui.resume import do_resume_session, format_session_item
+        from forgecode.tui.choices import ChoiceOption, ask_choice
+        from forgecode.tui.resume import do_resume_session, plain_session_item
 
         sessions = list_sessions(self._sessions_dir)
 
@@ -971,57 +971,17 @@ class ForgeApp:
             self.console.print("[dim]没有可恢复的历史会话[/dim]")
             return
 
-        # 显示会话列表
-        self.console.print()
-        self.console.print("[bold]📋 历史会话列表[/bold]")
-        self.console.print(f"[dim]共 {len(sessions)} 个会话，输入序号恢复，Esc 取消[/dim]")
-        self.console.print()
-
-        for i, info in enumerate(sessions, 1):
-            self.console.print(format_session_item(info, i))
-
-        self.console.print()
-
-        # 等待用户选择（prompt_toolkit prompt 支持 ESC 立即取消）
-        def _read_choice() -> str:
-            kb = KeyBindings()
-
-            @kb.add("escape")
-            def _on_esc(event: object) -> None:
-                event.app.exit(result="__ESC__")  # type: ignore[union-attr]
-
-            @kb.add("enter")
-            def _on_enter(event: object) -> None:
-                event.app.exit(result=event.app.current_buffer.text)  # type: ignore[union-attr]
-
-            try:
-                return pt_prompt(
-                    "  选择序号（Esc 取消）: ",
-                    key_bindings=kb,
-                ).strip()
-            except (EOFError, KeyboardInterrupt):
-                return "__ESC__"
-
-        try:
-            choice = await asyncio.get_running_loop().run_in_executor(None, _read_choice)
-        except (EOFError, KeyboardInterrupt):
+        result = await ask_choice(
+            title="📋 历史会话列表",
+            subtitle=f"共 {len(sessions)} 个会话",
+            options=[ChoiceOption(str(i), plain_session_item(info)) for i, info in enumerate(sessions)],
+            page_size=10,
+        )
+        if result.cancelled:
             self.console.print("[dim]已取消[/dim]")
             return
 
-        if not choice or choice == "__ESC__":
-            self.console.print("[dim]已取消[/dim]")
-            return
-
-        try:
-            idx = int(choice) - 1
-            if idx < 0 or idx >= len(sessions):
-                self.console.print("[red]无效的序号[/red]")
-                return
-        except ValueError:
-            self.console.print("[red]请输入数字序号[/red]")
-            return
-
-        selected = sessions[idx]
+        selected = sessions[int(result.values[0])]
         self.console.print(f"[dim]正在恢复会话 {selected.id}...[/dim]")
 
         # 派发 SessionEnd（旧会话）

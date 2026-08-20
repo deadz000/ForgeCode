@@ -119,7 +119,11 @@ def render_choice_lines(
 
 
 class ChoiceQuestion:
-    """方向键选择题。单选：Enter 直接确认当前项；多选：Enter 勾选 + 确认项提交。"""
+    """方向键选择题。单选：Enter 直接确认当前项；多选：Enter 勾选 + 确认项提交。
+
+    支持分页（单选场景）：page_size > 0 时每页显示固定条数，
+    ←/→ 翻页（多选 + 分页组合暂不支持，多选时忽略分页）。
+    """
 
     def __init__(
         self,
@@ -129,6 +133,7 @@ class ChoiceQuestion:
         subtitle: str = "",
         multi: bool = False,
         default_index: int = 0,
+        page_size: int = 0,
     ) -> None:
         self._title = title
         self._options = list(options)
@@ -136,20 +141,57 @@ class ChoiceQuestion:
         self._multi = multi
         self._selected = default_index
         self._checked: set[int] = set()
+        self._page_size = page_size if not multi else 0  # 多选暂不支持分页
+
+    # ── 分页 ──
+
+    def _page_count(self) -> int:
+        if self._page_size <= 0 or not self._options:
+            return 1
+        return (len(self._options) + self._page_size - 1) // self._page_size
+
+    def _current_page(self) -> int:
+        if self._page_size <= 0:
+            return 0
+        return self._selected // self._page_size
+
+    def _page_options(self) -> list[ChoiceOption]:
+        if self._page_size <= 0:
+            return self._options
+        start = self._current_page() * self._page_size
+        return self._options[start : start + self._page_size]
 
     # ── 渲染 ──
 
     def _render(self) -> StyleAndTextTuples:
-        result: StyleAndTextTuples = []
-        for style, text in render_choice_lines(
-            self._title,
-            self._options,
-            self._selected,
-            self._checked,
-            subtitle=self._subtitle,
-            multi=self._multi,
-        ):
-            result.append((style, text))
+        result: StyleAndTextTuples = [("class:title", self._title)]
+        if self._subtitle:
+            result.append(("class:subtitle", self._subtitle))
+        page_opts = self._page_options()
+        if not page_opts:
+            result.append(("class:hint", "（无可用选项）"))
+            return result
+        page = self._current_page()
+        page_size = self._page_size or len(self._options)
+        for i, opt in enumerate(page_opts):
+            idx = page * page_size + i
+            if self._multi:
+                mark = "[x]" if idx in self._checked else "[ ]"
+                prefix = f"{mark} {idx + 1}."
+            else:
+                prefix = f"{idx + 1}."
+            style = "class:selected" if idx == self._selected else ""
+            suffix = f"  {opt.description}" if opt.description else ""
+            result.append((style, f"{prefix} {opt.label}{suffix}"))
+        if self._multi:
+            style = "class:selected" if self._selected == len(self._options) else ""
+            result.append((style, "[ 确认提交 ]"))
+        if self._page_size > 0 and self._page_count() > 1:
+            result.append(("class:hint", f"（第 {page + 1}/{self._page_count()} 页 · ←/→ 翻页）"))
+        hint = "↑/↓ 选择 · Enter 确认 · Esc 取消"
+        if self._multi:
+            hint = "↑/↓ 移动 · Enter 勾选 · 移到『确认提交』按 Enter 提交 · Esc 取消"
+        result.append(("class:hint", hint))
         return result
 
     # ── 交互 ──
@@ -167,6 +209,24 @@ class ChoiceQuestion:
     def _on_down(self, event: KeyPressEvent) -> None:
         self._selected = move_cursor(self._selected, 1, self._item_count())
         event.app.invalidate()
+
+    def _on_left(self, event: KeyPressEvent) -> None:
+        """← 翻上一页（选中项跳到新页首项）。"""
+        if self._page_size <= 0 or self._page_count() <= 1:
+            return
+        page = self._current_page()
+        if page > 0:
+            self._selected = (page - 1) * self._page_size
+            event.app.invalidate()
+
+    def _on_right(self, event: KeyPressEvent) -> None:
+        """→ 翻下一页（选中项跳到新页首项）。"""
+        if self._page_size <= 0 or self._page_count() <= 1:
+            return
+        page = self._current_page()
+        if page < self._page_count() - 1:
+            self._selected = min((page + 1) * self._page_size, len(self._options) - 1)
+            event.app.invalidate()
 
     def _item_count(self) -> int:
         """可选中的项数：多选时含『确认提交』。"""
@@ -210,6 +270,14 @@ class ChoiceQuestion:
         def _ctrlc(event: KeyPressEvent) -> None:
             self._on_cancel(event)
 
+        @kb.add("left")
+        def _left(event: KeyPressEvent) -> None:
+            self._on_left(event)
+
+        @kb.add("right")
+        def _right(event: KeyPressEvent) -> None:
+            self._on_right(event)
+
         body = Window(
             FormattedTextControl(self._render),
             dont_extend_height=True,
@@ -236,9 +304,17 @@ async def ask_choice(
     subtitle: str = "",
     multi: bool = False,
     default_index: int = 0,
+    page_size: int = 0,
     input: Any = None,
     output: Any = None,
 ) -> ChoiceResult:
-    """便捷入口：构造 ChoiceQuestion 并运行。"""
-    q = ChoiceQuestion(title, options, subtitle=subtitle, multi=multi, default_index=default_index)
+    """便捷入口：构造 ChoiceQuestion 并运行。page_size>0 启用 ←/→ 翻页（单选）。"""
+    q = ChoiceQuestion(
+        title,
+        options,
+        subtitle=subtitle,
+        multi=multi,
+        default_index=default_index,
+        page_size=page_size,
+    )
     return await q.run(input=input, output=output)

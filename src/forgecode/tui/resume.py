@@ -21,8 +21,8 @@ _RESUME_SAFETY_MARGIN = 3000
 _RESUME_SUMMARY_RESERVE = 20000
 
 
-def format_session_item(info: SessionInfo, index: int) -> str:
-    """格式化单条会话列表项。"""
+def _session_meta(info: SessionInfo) -> tuple[str, str, str]:
+    """返回 (title, rel_time, size_str) 会话列表元信息。"""
     # 相对时间
     now = datetime.now()
     delta = now - info.modified_at
@@ -46,8 +46,19 @@ def format_session_item(info: SessionInfo, index: int) -> str:
         size_str = f"{info.size}B"
 
     title = info.title if info.title else "(空)"
+    return title, rel_time, size_str
 
+
+def format_session_item(info: SessionInfo, index: int) -> str:
+    """格式化单条会话列表项（带 rich 标记）。"""
+    title, rel_time, size_str = _session_meta(info)
     return f"  {index}. {title}  [dim]· {rel_time} · {info.model} · {size_str}[/dim]"
+
+
+def plain_session_item(info: SessionInfo) -> str:
+    """会话列表项的纯文本（无 rich 标记），供方向键选择器 label 使用。"""
+    title, rel_time, size_str = _session_meta(info)
+    return f"{title}  · {rel_time} · {info.model} · {size_str}"
 
 
 async def do_resume_session(
