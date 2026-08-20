@@ -562,11 +562,7 @@ class ForgeApp:
         it = self._total_input_tokens
         ot = self._total_output_tokens
         tok_str = f"↑{_fmt_tok(it)} ↓{_fmt_tok(ot)}"
-        if self._agent_running:
-            elapsed = f"Imagining… ({time.time() - self._response_start:.0f}s)"
-            if self._iter > 0:
-                elapsed += f" · 第{self._iter}轮"
-        elif self._response_elapsed > 0:
+        if self._response_elapsed > 0:
             elapsed = f"{self._response_elapsed:.1f}s"
         else:
             elapsed = "..."
@@ -1019,16 +1015,13 @@ class ForgeApp:
 
         self.console.print()
         self.console.print(f"[bold cyan]user:[/bold cyan] {text}")
-
-        # 启动实时计时器
-        timer_task = asyncio.create_task(self._show_imagining())
+        self.console.print("[dim]Thinking...[/dim]")
 
         # 获取持久 Agent 实例
         agent = self._get_agent()
         cur_text = ""
         in_thinking = False
         thinking_shown_header = False
-        first_content = False
 
         # 主 Agent Run 前注入 ctx cwd（active_cwd 为空 = 进程 cwd）
         cwd_cm = with_cwd(self._effective_cwd())
@@ -1037,8 +1030,6 @@ class ForgeApp:
             async for ev in agent.run(self.conversation, self.mode, self._turn_cancel):
                 # ── 压缩生命周期事件（优先处理）──
                 if ev.compact is not None:
-                    self._on_first_content(timer_task, first_content)
-                    first_content = True
                     in_thinking = False
                     notice = _format_compact_notice(ev.compact)
                     if notice:
@@ -1047,22 +1038,18 @@ class ForgeApp:
                     continue
 
                 if ev.thinking:
-                    self._on_first_content(timer_task, first_content)
-                    first_content = True
                     if not in_thinking:
                         in_thinking = True
                     if self._show_thinking:
                         if not thinking_shown_header:
-                            self.console.print("[dim]💭 思考过程:[/dim]")
+                            self.console.print("[dim]Thinking:[/dim]")
                             thinking_shown_header = True
                         self._stream_text(ev.thinking)
                     elif not thinking_shown_header:
-                        self.console.print("[dim]💭 思考中...（/thinking on 展开）[/dim]")
+                        self.console.print("[dim]（/thinking on 可展开思考过程）[/dim]")
                         thinking_shown_header = True
 
                 elif ev.text:
-                    self._on_first_content(timer_task, first_content)
-                    first_content = True
                     if in_thinking:
                         in_thinking = False
                         if self._show_thinking:
@@ -1076,18 +1063,11 @@ class ForgeApp:
                     self._total_output_tokens += ev.usage.output_tokens
 
                 elif ev.approval is not None:
-                    # 人在回路：先固化正文渲染，再展示待批准块
+                    # 人在回路：先固化正文渲染，再展示待批准选择题
                     self._finalize_live(cur_text)
-                    await self._handle_approval(ev.approval, timer_task)
-                    # 审批通过后主 Agent 继续执行工具（可能启动子 Agent），
-                    # _handle_approval 已取消原计时器，这里重启以便有可见反馈。
-                    if not timer_task.done():
-                        timer_task.cancel()
-                    timer_task = asyncio.create_task(self._show_imagining())
+                    await self._handle_approval(ev.approval)
 
                 elif ev.tool is not None:
-                    self._on_first_content(timer_task, first_content)
-                    first_content = True
                     in_thinking = False
                     thinking_shown_header = False
                     self._finalize_live(cur_text)
@@ -1100,7 +1080,10 @@ class ForgeApp:
                         self._render_tool_end(ev.tool)
 
                 elif ev.iter > 0:
-                    self._iter = ev.iter
+                    # 轮次变化时输出阶段提示（ev.iter 每轮递增一次）
+                    if ev.iter != self._iter:
+                        self._iter = ev.iter
+                        self.console.print(f"[dim]▶ 第{ev.iter}轮[/dim]")
 
                 elif ev.notice:
                     self._finalize_live(cur_text)
@@ -1108,12 +1091,10 @@ class ForgeApp:
                     self.console.print(f"[dim]{ev.notice}[/dim]")
 
                 elif ev.done:
-                    self._on_first_content(timer_task, first_content)
                     self._response_elapsed = time.time() - self._response_start
                     self._finalize_live(cur_text)
 
                 elif ev.err:
-                    self._on_first_content(timer_task, first_content)
                     self._finalize_live(cur_text)
                     self.console.print(f"[red]✕ {ev.err}[/red]")
 
@@ -1130,43 +1111,17 @@ class ForgeApp:
             self.console.print(f"[red]✕ 对话出错: {e}[/red]")
         finally:
             cwd_cm.__exit__(None, None, None)
-            # 无论正常/异常/取消，完整清理——残留的 timer/agent_running/turn_cancel
-            # 会导致状态栏永远 Imagining、后续 Ctrl+C 全部误判为流式态
-            timer_task.cancel()
+            # 无论正常/异常/取消，完整清理——残留的 agent_running/turn_cancel
+            # 会导致后续 Ctrl+C 误判为流式态
             self._agent_running = False
             self._turn_cancel = None
             self._finalize_live(cur_text)
             self.console.print()
 
-    # ── 响应计时器 ────────────────────────────────
-
-    async def _show_imagining(self) -> None:
-        """实时显示 'Imagining… (Ns)'，秒数递增。"""
-        sys.stdout.write("\n🤖 Imagining… (0s)")
-        sys.stdout.flush()
-        try:
-            while True:
-                await asyncio.sleep(0.1)
-                elapsed = time.time() - self._response_start
-                iter_str = f" · 第{self._iter}轮" if self._iter > 0 else ""
-                sys.stdout.write(f"\r🤖 Imagining… ({elapsed:.0f}s{iter_str})")
-                sys.stdout.flush()
-        except asyncio.CancelledError:
-            pass
-
-    @staticmethod
-    def _on_first_content(timer_task: asyncio.Task, first: bool) -> None:
-        """首次收到内容时取消计时器，结束 \\r 状态行。"""
-        if not first:
-            timer_task.cancel()
-            sys.stdout.write("\n")
-            sys.stdout.flush()
-
     # ── 人在回路 ──────────────────────────────────
 
-    async def _handle_approval(self, req: ApprovalRequest, timer_task: asyncio.Task) -> None:
+    async def _handle_approval(self, req: ApprovalRequest) -> None:
         """展示待批准选择题，等待用户方向键选择（单选）。"""
-        timer_task.cancel()
         self.console.print("\n")
         from forgecode.tui.choices import ChoiceOption, ask_choice
 
