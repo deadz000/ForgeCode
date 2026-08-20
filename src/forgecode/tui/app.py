@@ -116,6 +116,9 @@ class ForgeApp:
         self.console = Console()
         self._width = shutil.get_terminal_size().columns
         self._turn_live: Live | None = None
+        # 流式 Markdown 渲染节流状态
+        self._last_md_len: int = 0
+        self._last_md_at: float = 0.0
         self._show_thinking: bool = False
         self._exit_flag: bool = False
         # Agent Loop 状态
@@ -1012,6 +1015,8 @@ class ForgeApp:
         self._iter = 0
         self._agent_running = True
         self._turn_live = None
+        self._last_md_len = 0
+        self._last_md_at = 0.0
 
         self.console.print()
         self.console.print(f"[bold cyan]user:[/bold cyan] {text}")
@@ -1185,7 +1190,11 @@ class ForgeApp:
     # ── 正文区 Live 覆盖 ──────────────────────────
 
     def _live_update(self, text: str) -> None:
-        """把流式正文更新到 Live 区域（原地刷新，不产生重复文本）。"""
+        """把流式正文更新到 Live 区域（原地刷新，不产生重复文本）。
+
+        流式期间即用 Markdown 渲染（带节流与未闭合代码块兜底），
+        避免结束时突然从纯文本跳变为排版。
+        """
         if self._turn_live is None:
             self._turn_live = Live(
                 console=self.console,
@@ -1193,7 +1202,19 @@ class ForgeApp:
                 transient=False,
             )
             self._turn_live.start()
-        self._turn_live.update(Text(text))
+        if self._md_render_due(len(text)):
+            self._turn_live.update(self._render_markdown(_prepare_markdown_render(text)))
+        else:
+            self._turn_live.update(Text(text))
+
+    def _md_render_due(self, text_len: int) -> bool:
+        """节流判定：增量足够大或距上次渲染足够久时重渲染 Markdown。"""
+        now = time.monotonic()
+        if text_len - self._last_md_len >= _MD_RENDER_CHUNK or now - self._last_md_at >= _MD_RENDER_INTERVAL:
+            self._last_md_len = text_len
+            self._last_md_at = now
+            return True
+        return False
 
     def _finalize_live(self, cur_text: str) -> None:
         """结束正文区：用 Markdown 渲染原地替换流式源码并固定到屏幕。
@@ -1279,3 +1300,20 @@ def _fmt_tok(n: int) -> str:
     if n >= 1000:
         return f"{n / 1000:.1f}k"
     return str(n)
+
+
+# ── 流式 Markdown 渲染节流 ────────────────────────
+
+_MD_RENDER_CHUNK: int = 512  # 增量超过该字符数才重渲染 Markdown
+_MD_RENDER_INTERVAL: float = 0.3  # 距上次渲染超过该秒数才重渲染
+
+
+def _prepare_markdown_render(text: str) -> str:
+    """未闭合 ``` 代码块截断：只渲染已闭合部分，避免渲染器把后续内容吞进代码块。
+
+    返回的字符串在闭合后自然恢复完整渲染；空串表示当前没有可渲染的闭合内容。
+    """
+    if text.count("```") % 2 == 0:
+        return text
+    pos = text.rfind("```")
+    return text[:pos]
