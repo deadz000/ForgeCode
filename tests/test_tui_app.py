@@ -147,6 +147,48 @@ def test_on_resize_updates_width_and_invalidates(monkeypatch) -> None:
     assert fake_app.invalidated == 1
 
 
+# ── A10 退出交互 ─────────────────────────────
+
+
+class _FakeCtrlCEvent:
+    def __init__(self) -> None:
+        self.app = _FakeCtrlCApp()
+
+
+class _FakeCtrlCApp:
+    def __init__(self) -> None:
+        self.exits: list[BaseException | None] = []
+
+    def exit(self, exception: BaseException | None = None) -> None:
+        self.exits.append(exception)
+
+
+def test_ctrl_c_idle_twice_to_exit() -> None:
+    app = _make_app()
+    app._agent_running = False
+    ev = _FakeCtrlCEvent()
+    app._ctrl_c_handler(ev)  # type: ignore[arg-type]
+    assert app._idle_ctrl_c_count == 1
+    assert ev.app.exits == []
+    app._ctrl_c_handler(ev)  # type: ignore[arg-type]
+    assert app._idle_ctrl_c_count == 2
+    assert len(ev.app.exits) == 1
+    assert isinstance(ev.app.exits[0], KeyboardInterrupt)
+
+
+def test_ctrl_c_during_agent_sets_cancel() -> None:
+    import asyncio
+
+    app = _make_app()
+    app._agent_running = True
+    cancel = asyncio.Event()
+    app._turn_cancel = cancel
+    ev = _FakeCtrlCEvent()
+    app._ctrl_c_handler(ev)  # type: ignore[arg-type]
+    assert cancel.is_set()
+    assert ev.app.exits == []
+
+
 # ── A5 工具调用日志（折叠 + /tool 展开）───────
 
 

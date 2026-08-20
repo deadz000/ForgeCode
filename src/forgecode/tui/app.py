@@ -56,6 +56,9 @@ FORGECODE_ART = r"""
 
 VERSION = "0.2.0"
 
+# 空闲态第一次 Ctrl+C 的退出提示
+EXIT_HINT = "再按一次 Ctrl+C 退出"
+
 # ── prompt_toolkit 样式 ───────────────────────────
 
 PROMPT_STYLE = Style.from_dict(
@@ -751,20 +754,7 @@ class ForgeApp:
 
         @kb.add("c-c")
         def _on_ctrl_c(event: KeyPressEvent) -> None:
-            # 空闲态：第一次只提示、不退出应用（退出会让外层 continue
-            # 重新渲染一个新输入框，造成重复）；第二次才退出。
-            if self._agent_running:
-                if self._turn_cancel is not None and not self._turn_cancel.is_set():
-                    self._turn_cancel.set()
-                self.console.print()
-                self.console.print("[dim]正在取消...[/dim]")
-                return
-            self._idle_ctrl_c_count += 1
-            if self._idle_ctrl_c_count >= 2:
-                event.app.exit(exception=KeyboardInterrupt())
-                return
-            self.console.print()
-            self.console.print("[dim]Press Ctrl+C again to exit[/dim]")
+            self._ctrl_c_handler(event)
 
         return Application(
             layout=Layout(container, focused_element=self._input_textarea),
@@ -776,6 +766,21 @@ class ForgeApp:
             input=self._make_input(),
             on_resize=self._on_resize,
         )
+
+    def _ctrl_c_handler(self, event: KeyPressEvent) -> None:
+        """Ctrl+C：Agent 运行中取消本轮；空闲态第一次提示、第二次退出。"""
+        if self._agent_running:
+            if self._turn_cancel is not None and not self._turn_cancel.is_set():
+                self._turn_cancel.set()
+            self.console.print()
+            self.console.print("[dim]正在取消...[/dim]")
+            return
+        self._idle_ctrl_c_count += 1
+        if self._idle_ctrl_c_count >= 2:
+            event.app.exit(exception=KeyboardInterrupt())
+            return
+        self.console.print()
+        self.console.print(f"[dim]{EXIT_HINT}[/dim]")
 
     def _border_text(self) -> str:
         """输入盒边框：按当前终端宽度生成（resize 后 invalidate 即重绘）。"""
