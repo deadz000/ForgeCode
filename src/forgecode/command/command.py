@@ -33,3 +33,4 @@ class Command:
     hidden: bool = False  # /help 与补全菜单都不显示，但 dispatcher 仍可命中
     accepts_args: bool = False  # True=接受尾随参数，handler 通过 ui 取 args
     is_skill: bool = False  # True=由 Skill 自动注册
+    argument_completer: Callable[[str], list[str]] | None = None  # 参数补全：输入 "/name " 后调用

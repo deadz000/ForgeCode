@@ -214,6 +214,7 @@ class ForgeApp:
                 handler=self._handle_thinking,
                 hidden=True,
                 accepts_args=True,
+                argument_completer=lambda prefix: [s for s in ("on", "off") if s.startswith(prefix)],
             )
         )
         self.cmd_registry = reg

@@ -26,6 +26,15 @@ from forgecode.command.registry import Registry
 from forgecode.tui.hooks import handle_hooks
 
 
+def _subcommand_completer(*subs: str):
+    """生成参数补全器：按前缀过滤子命令候选（/cmd <tab> 时触发）。"""
+
+    def _complete(prefix: str) -> list[str]:
+        return [s for s in subs if s.startswith(prefix)]
+
+    return _complete
+
+
 def register_builtins(reg: Registry) -> None:
     """向 reg 注册全部 12 条内置命令（按 name 字典序排列）。"""
 
@@ -122,6 +131,7 @@ def register_builtins(reg: Registry) -> None:
             kind=Kind.LOCAL,
             handler=handle_team,
             accepts_args=True,
+            argument_completer=_subcommand_completer("list", "info", "delete", "kill"),
         ),
         Command(
             name="tool",
@@ -129,6 +139,7 @@ def register_builtins(reg: Registry) -> None:
             kind=Kind.LOCAL,
             handler=handle_tool,
             accepts_args=True,
+            argument_completer=_subcommand_completer("last", "clear"),
         ),
         Command(
             name="worktree",
@@ -136,6 +147,7 @@ def register_builtins(reg: Registry) -> None:
             kind=Kind.LOCAL,
             handler=handle_worktree,
             accepts_args=True,
+            argument_completer=_subcommand_completer("create", "list", "enter", "exit", "remove"),
         ),
     ]
 
