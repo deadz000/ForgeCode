@@ -595,10 +595,18 @@ class ForgeApp:
             elapsed = f"{self._response_elapsed:.1f}s"
         else:
             elapsed = "..."
+        sid = self.session_id()
+        sid_str = f"[{sid[:8]}] " if sid else ""
+        cwd_str = _shorten_path(self.cwd(), max_len=32)
         mcp_line = self._mcp_summary()
         mcp_str = f" | {mcp_line}" if mcp_line else ""
         coord_str = " | [COORDINATOR]" if self.coordinator_mode else ""
-        return f" {mode_label} │ {model_name} │ {tok_str} │ {elapsed} " + mcp_str + coord_str + " "
+        return (
+            f" {sid_str}{mode_label} │ {model_name} │ {cwd_str} │ {tok_str} │ {elapsed} "
+            + mcp_str
+            + coord_str
+            + " "
+        )
 
     def _make_input(self):
         """构造输入读取器：让 Windows 下 Shift+Enter 识别为换行。
@@ -1353,6 +1361,18 @@ def _fmt_tok(n: int) -> str:
     if n >= 1000:
         return f"{n / 1000:.1f}k"
     return str(n)
+
+
+def _shorten_path(path: str, max_len: int = 32) -> str:
+    """缩写路径：home 用 ~ 替换；过长时保留头尾。"""
+    home = os.path.expanduser("~")
+    if path.startswith(home):
+        path = "~" + path[len(home) :]
+    if len(path) <= max_len:
+        return path
+    head_len = max_len // 2 - 1
+    tail_len = max_len - head_len - 3
+    return path[:head_len] + "..." + path[-tail_len:]
 
 
 # ── 流式 Markdown 渲染节流 ────────────────────────

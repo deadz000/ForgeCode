@@ -16,6 +16,7 @@ from forgecode.tui.app import (
     _TOOL_LOG_LIMIT,
     ForgeApp,
     _prepare_markdown_render,
+    _shorten_path,
 )
 from tests.test_agent_hook import FakeProvider
 
@@ -145,6 +146,36 @@ def test_on_resize_updates_width_and_invalidates(monkeypatch) -> None:
     app._on_resize(fake_app)  # type: ignore[arg-type]
     assert app._width == 100
     assert fake_app.invalidated == 1
+
+
+# ── A8 状态栏信息完善 ─────────────────────────
+
+
+def test_shorten_path_replaces_home(monkeypatch) -> None:
+    monkeypatch.setattr("forgecode.tui.app.os.path.expanduser", lambda _: "C:\\Users\\me")
+    assert _shorten_path("C:\\Users\\me\\proj") == "~\\proj"
+
+
+def test_shorten_path_truncates_long() -> None:
+    path = "x" * 100
+    short = _shorten_path(path, max_len=32)
+    assert len(short) == 32
+    assert short.startswith("xxx") and short.endswith("xxx") and "..." in short
+
+
+def test_shorten_path_short_unchanged() -> None:
+    assert _shorten_path("a/b/c", max_len=32) == "a/b/c"
+
+
+def test_status_text_includes_cwd_and_session() -> None:
+    app = _make_app()
+    text = app._render_status_text()
+    # cwd 以缩写形式出现
+    assert _shorten_path(os.getcwd()) in text
+    # session id（new_runtime 已创建会话）以 [xxxx] 前缀出现
+    sid = app.session_id()
+    if sid:
+        assert f"[{sid[:8]}]" in text
 
 
 # ── A10 退出交互 ─────────────────────────────
